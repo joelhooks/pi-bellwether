@@ -1,0 +1,50 @@
+---
+title: "pi-herdr extension shape"
+status: "draft-implemented"
+source: "local session 2026-06-26"
+privacy: "project-local"
+---
+
+# pi-herdr extension shape
+
+## Decision
+
+`pi-herdr` is a generic Pi package for Herdr runtime management. It owns Herdr agent/pane commands and tools. Product-specific loop bridges should call or adapt `pi-herdr`; they should not bury generic Herdr control inside loop-specific code.
+
+## Initial scope
+
+Commands:
+
+- `/herdr-status`
+- `/herdr-agents`
+- `/herdr-start <name> -- <cmd>`
+- `/herdr-send <target> <msg>`
+- `/herdr-submit <target>`
+- `/herdr-read <target>`
+- `/herdr-focus <target>`
+- `/herdr-stop <target>`
+
+Tools:
+
+- `herdr_status`
+- `herdr_list_agents`
+- `herdr_start_agent`
+- `herdr_send_message`
+- `herdr_submit`
+- `herdr_read_agent`
+- `herdr_focus_agent`
+- `herdr_stop_agent`
+
+## Design receipts
+
+- Pi package docs say package resources belong under `package.json` `pi` manifest or conventional directories, and package imports of Pi core packages should be peer dependencies.
+- Pi extension docs say use `pi.registerTool()` and `pi.registerCommand()`; tool results need cloneable `details`; optional runtime dependencies should be lazy.
+- Herdr CLI 0.7.0 exposes `herdr agent list|get|read|send|focus|start`, `herdr pane send-keys|close|list`, and `herdr status`.
+- Current machine receipt while building: client `herdr 0.7.0`, server `0.6.8`, protocol mismatch reported by `herdr status`, but agent/pane list/read commands still returned JSON.
+
+## Boundaries
+
+- This package starts no background process at Pi startup.
+- Herdr binary lookup happens lazily when a command/tool runs.
+- Stop/close requires confirmation in slash command and `confirm: true` in the LLM tool.
+- Send and submit are intentionally separate so agents do not accidentally execute text while composing.

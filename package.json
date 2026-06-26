@@ -1,0 +1,32 @@
+{
+  "name": "@joelhooks/pi-herdr",
+  "version": "0.1.0",
+  "description": "Pi package for managing Herdr agents, panes, and runtime sessions from slash commands and LLM tools.",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "herdr", "terminal", "agents"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joelhooks/pi-herdr"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "check": "bun --check extensions/pi-herdr.ts",
+    "smoke": "bash -lc 'PI_OFFLINE=1 pi -e . --help >/tmp/pi-herdr-help.out 2>/tmp/pi-herdr-help.err; status=$?; rg -n \"pi-herdr|herdr_|cannot load|Error loading\" /tmp/pi-herdr-help.out /tmp/pi-herdr-help.err || true; exit $status'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "latest",
+    "@earendil-works/pi-coding-agent": "latest",
+    "@types/node": "latest",
+    "typebox": "latest",
+    "typescript": "latest"
+  }
+}

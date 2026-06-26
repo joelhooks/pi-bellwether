@@ -1,0 +1,11 @@
+---
+title: "pi-herdr Brain"
+---
+
+# pi-herdr Brain
+
+Project memory for the Pi ↔ Herdr integration package.
+
+## Resources
+
+- [Extension shape](./resources/pi-herdr-extension-shape.svx)
