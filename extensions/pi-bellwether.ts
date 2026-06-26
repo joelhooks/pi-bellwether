@@ -427,7 +427,7 @@ async function showEditor(ctx: { ui: { editor: (title: string, text: string) => 
   await ctx.ui.editor(title, text);
 }
 
-export default function herdrExtension(pi: ExtensionAPI) {
+export default function bellwetherExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "herdr_status",
     label: "Herdr Status",

@@ -1,11 +1,11 @@
 ---
-title: "pi-herdr Brain"
+title: "Bellwether Brain"
 ---
 
-# pi-herdr Brain
+# Bellwether Brain 🐏🔔
 
 Project memory for the Pi ↔ Herdr integration package.
 
 ## Resources
 
-- [Extension shape](./resources/pi-herdr-extension-shape.svx)
+- [Extension shape](./resources/pi-bellwether-extension-shape.svx)

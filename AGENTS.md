@@ -2,7 +2,7 @@
 
 ## Project shape
 
-`pi-herdr` is a Pi package that exposes generic Herdr runtime management as slash commands and LLM tools.
+Bellwether 🐏🔔 (`@joelhooks/pi-bellwether`) is a Pi package that exposes generic Herdr runtime management as slash commands and LLM tools.
 
 Generic Herdr control belongs here. Product-specific loop behavior belongs in downstream loop extensions that depend on or adapt this package.
 
@@ -14,6 +14,7 @@ Generic Herdr control belongs here. Product-specific loop behavior belongs in do
 - Tool `details` must stay cloneable plain data.
 - Read/list before send/stop when target identity is unclear.
 - Stop/close stays guarded: slash command confirmation and `herdr_stop_agent({ confirm: true })`.
+- Prior-art packages named `pi-herdr` already exist; keep this repo/package branded as Bellwether unless Joel explicitly changes it again.
 
 ## Checks
 

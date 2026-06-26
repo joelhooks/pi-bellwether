@@ -1,11 +1,13 @@
 ---
-name: pi-herdr
-description: Manage Herdr agents and panes from Pi. Use when listing Herdr agents, reading pane output, sending/submitting text to another agent, focusing panes, starting managed Herdr processes, or safely closing Herdr panes.
+name: pi-bellwether
+description: Manage Herdr agents and panes from Pi with Bellwether 🐏🔔. Use when listing Herdr agents, reading pane output, sending/submitting text to another agent, focusing panes, starting managed Herdr processes, or safely closing Herdr panes.
 ---
 
-# Pi Herdr
+# Pi Bellwether 🐏🔔
 
 Use this skill when Pi needs to coordinate with Herdr-managed terminal agents/panes.
+
+Bellwether is the bell sheep for Herdr: it helps Pi find, read, nudge, focus, start, and stop the flock.
 
 ## Operating rules
 
