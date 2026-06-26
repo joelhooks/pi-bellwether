@@ -15,22 +15,24 @@ There is already prior art using that name:
 
 So this package uses a distinct identity: **Bellwether 🐏🔔**.
 
-## Install locally
+## Install
+
+Install from GitHub:
 
 ```bash
-pi install /Users/joel/Code/joelhooks/pi-bellwether
+pi install git:github.com/joelhooks/pi-bellwether
+```
+
+Or use a local checkout:
+
+```bash
+pi install /path/to/pi-bellwether
 ```
 
 For a one-off smoke test without installing:
 
 ```bash
-PI_OFFLINE=1 pi -e /Users/joel/Code/joelhooks/pi-bellwether --help
-```
-
-If you still have the old local checkout path, this also works until you rename the folder:
-
-```bash
-pi install /Users/joel/Code/joelhooks/pi-herdr
+PI_OFFLINE=1 pi -e /path/to/pi-bellwether --help
 ```
 
 ## Slash commands
