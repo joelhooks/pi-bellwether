@@ -14,7 +14,6 @@ Generic Herdr control belongs here. Product-specific loop behavior belongs in do
 - Tool `details` must stay cloneable plain data.
 - Read/list before send/stop when target identity is unclear.
 - Stop/close stays guarded: slash command confirmation and `herdr_stop_agent({ confirm: true })`.
-- Prior-art packages named `pi-herdr` already exist; keep this repo/package branded as Bellwether unless Joel explicitly changes it again.
 
 ## Checks
 

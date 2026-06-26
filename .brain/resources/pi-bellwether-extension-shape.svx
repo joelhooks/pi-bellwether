@@ -11,13 +11,6 @@ privacy: "project-local"
 
 Bellwether (`@joelhooks/pi-bellwether`) is a generic Pi package for Herdr runtime management. It owns Herdr agent/pane commands and tools. Product-specific loop bridges should call or adapt Bellwether; they should not bury generic Herdr control inside loop-specific code.
 
-The package was renamed from `pi-herdr` because prior art already uses that name:
-
-- `@ogulcancelik/pi-herdr` in `ogulcancelik/pi-extensions/packages/pi-herdr`
-- `@weshipwork/pi-herdr` in `WeShipWork/threeonefour/packages/pi-herdr`
-
-Mascot: **Bellwether 🐏🔔**, the sheep with the bell leading the flock.
-
 ## Initial scope
 
 Commands:
@@ -41,14 +34,6 @@ Tools:
 - `herdr_read_agent`
 - `herdr_focus_agent`
 - `herdr_stop_agent`
-
-## Prior-art ideas
-
-- Single `herdr` action tool is compact and easier to evolve without tool-list noise.
-- Friendly pane aliases reconstructed from tool result details are useful for workflows like `server`, `tests`, and `reviewer`.
-- Atomic `run` avoids fragile `send` + `Enter` two-step submission.
-- `watch` and `wait_agent` should probably become first-class Bellwether tools/actions.
-- Registering only inside Herdr (`HERDR_ENV` + `HERDR_PANE_ID`) keeps tool clutter down, but Bellwether currently chooses general controller behavior from any Pi session that can reach `herdr`.
 
 ## Design receipts
 

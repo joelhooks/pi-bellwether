@@ -13,7 +13,6 @@
   "bugs": {
     "url": "https://github.com/joelhooks/pi-bellwether/issues"
   },
-  "mascot": "🐏🔔",
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"]
