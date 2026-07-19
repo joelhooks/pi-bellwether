@@ -120,6 +120,13 @@ async function runHerdrJson(args: string[], options: { signal?: AbortSignal; tim
   const stdout = run.stdout.trim();
   let parsed: unknown;
 
+  // Some herdr commands (e.g. `pane send-keys`) print nothing on success.
+  // runHerdr has already rejected non-zero exits, so an empty stdout here is
+  // a successful run with no payload, not a JSON parse failure.
+  if (stdout === "") {
+    return { ...run, envelope: {}, result: undefined };
+  }
+
   try {
     parsed = JSON.parse(stdout);
   } catch (error) {
