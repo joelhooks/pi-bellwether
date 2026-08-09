@@ -1,6 +1,7 @@
 ---
 name: pi-bellwether
 description: Manage Herdr agents and panes from Pi with Bellwether 🐏🔔. Use when listing Herdr agents, reading pane output, sending/submitting text to another agent, focusing panes, starting managed Herdr processes, or safely closing Herdr panes.
+disable-model-invocation: true
 ---
 
 # Pi Bellwether 🐏🔔
