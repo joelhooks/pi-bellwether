@@ -47,6 +47,11 @@ Targets are whatever `herdr agent` accepts: terminal ids, pane ids, unique agent
 - `herdr_read_agent`
 - `herdr_focus_agent`
 - `herdr_stop_agent`
+- `herdr_ping_wait`
+
+`herdr_ping_wait` starts a session-owned background wait for the next event from one or more Herdr pane spools. Its `start` action returns immediately. When an event arrives, it wakes Pi with a follow-up receipt. It also supports `list`, `status`, and `cancel`. The external [`herdr-ping-wait`](https://github.com/joelhooks/herdr-pings) executable must be installed first.
+
+Long waits belong in `herdr_ping_wait`, not a blocking tool call or shell command. Bounded control operations such as status, list, read, focus, send, start, and stop remain synchronous. A `turn_ended` event means the agent settled; it does not prove the task finished.
 
 `herdr_stop_agent` requires `confirm: true` because it closes a terminal pane. Read/list first, stop second. FFS, don't let the robot blindly close terminals.
 
@@ -55,6 +60,7 @@ Targets are whatever `herdr agent` accepts: terminal ids, pane ids, unique agent
 ```bash
 npm install --ignore-scripts
 npm run check
+npm test
 npm run smoke
 pi-notes brain check
 ```

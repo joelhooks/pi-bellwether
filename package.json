@@ -18,8 +18,9 @@
     "skills": ["./skills"]
   },
   "scripts": {
-    "check": "bun --check extensions/pi-bellwether.ts",
-    "smoke": "bash -lc 'PI_OFFLINE=1 pi -e . --help >/tmp/pi-bellwether-help.out 2>/tmp/pi-bellwether-help.err; status=$?; rg -n \"pi-bellwether|herdr_|cannot load|Error loading\" /tmp/pi-bellwether-help.out /tmp/pi-bellwether-help.err || true; exit $status'"
+    "check": "tsc --project tsconfig.json",
+    "smoke": "bash -lc 'PI_OFFLINE=1 pi -e . --help >/tmp/pi-bellwether-help.out 2>/tmp/pi-bellwether-help.err; status=$?; rg -n \"pi-bellwether|herdr_|cannot load|Error loading\" /tmp/pi-bellwether-help.out /tmp/pi-bellwether-help.err || true; exit $status'",
+    "test": "bun test src extensions"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -29,8 +30,12 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "latest",
     "@earendil-works/pi-coding-agent": "latest",
+    "@types/bun": "^1.3.14",
     "@types/node": "latest",
     "typebox": "latest",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "xstate": "5.32.5"
   }
 }

@@ -1,0 +1,50 @@
+---
+title: "Async Herdr ping waits"
+status: "implemented"
+privacy: "public"
+---
+
+# Async Herdr ping waits
+
+## Decision
+
+`herdr_ping_wait` is a session-owned background watch. Its `start` action must return after it arms the `herdr-ping-wait` child process. It must not hold a Pi tool call open until a pane event arrives.
+
+Bellwether wakes Pi later with `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })`. Each Pi session gets a separate cursor file, so one orchestrator does not consume another orchestrator's events.
+
+## State machine
+
+```text
+running
+  ├─ MATCH   → matched
+  ├─ TIMEOUT → timedOut
+  ├─ FAIL    → failed
+  └─ CANCEL  → cancelled
+```
+
+All terminal states are final. Explicit cancellation and `session_shutdown` abort only child processes owned by this extension instance.
+
+## Sync versus background
+
+Keep these bounded control calls synchronous:
+
+- status and list
+- start and prompt submission
+- read and focus
+- stop after its guard passes
+
+Use the background-watch contract for operations whose purpose is to wait for outside state:
+
+- `herdr-ping-wait`
+- any future `herdr agent wait`
+- any future `herdr agent prompt --wait`
+- any future `herdr pane wait-output`
+
+A `turn_ended` event means the worker settled. It does not prove the worker completed its assigned task.
+
+## Receipts
+
+- `src/ping-wait.ts` owns the XState v5 lifecycle and child-process adapter.
+- `extensions/pi-bellwether.ts` owns Pi tool state, wake delivery, listing, inspection, cancellation, and shutdown cleanup.
+- `extensions/pi-bellwether.test.ts` proves `start` returns before the event and Pi wakes later.
+- `src/ping-wait.test.ts` covers match, timeout, boundary parsing, and cancellation.

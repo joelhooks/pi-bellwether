@@ -34,6 +34,7 @@ Tools:
 - `herdr_read_agent`
 - `herdr_focus_agent`
 - `herdr_stop_agent`
+- `herdr_ping_wait`
 
 ## Design receipts
 
@@ -45,6 +46,8 @@ Tools:
 ## Boundaries
 
 - This package starts no background process at Pi startup.
+- `herdr_ping_wait` starts its child process only after `action=start`, returns immediately, and aborts owned children on cancellation or session shutdown.
+- Bounded Herdr control calls stay synchronous. Wait-for-external-state calls use the background-watch contract.
 - Herdr binary lookup happens lazily when a command/tool runs.
 - Stop/close requires confirmation in slash command and `confirm: true` in the LLM tool.
 - Send and submit are intentionally separate so agents do not accidentally execute text while composing.

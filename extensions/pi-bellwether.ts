@@ -1,12 +1,31 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+
+import { StringEnum } from "@earendil-works/pi-ai";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import type { Static } from "typebox";
+
+import {
+  createPingWaitActor,
+  resolvePingWaitBinary,
+  runPingWait,
+  terminalPingWaitStatus,
+} from "../src/ping-wait.ts";
+import type {
+  PingWaitContext,
+  PingWaitInput,
+  PingWaitStatus,
+} from "../src/ping-wait.ts";
 import { access, constants } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_ACTIVE_PING_WAITS = 32;
 const MAX_BUFFER = 4 * 1024 * 1024;
 const HERDR_BIN_CANDIDATES = [
   join(homedir(), ".local/bin/herdr"),
@@ -17,6 +36,40 @@ const HERDR_BIN_CANDIDATES = [
 
 const readSourceEnum = StringEnum(["visible", "recent", "recent-unwrapped"] as const);
 const splitDirectionEnum = StringEnum(["right", "down"] as const);
+const pingWaitParameters = Type.Object(
+  {
+    action: StringEnum(["start", "list", "status", "cancel"] as const),
+    id: Type.Optional(
+      Type.String({ description: "Wait ID for status or cancel." }),
+    ),
+    label: Type.Optional(
+      Type.String({ description: "Short label for this wait." }),
+    ),
+    paneIds: Type.Optional(
+      Type.Array(Type.String({ pattern: "^w[A-Za-z0-9]+:p[A-Za-z0-9]+$" }), {
+        description: "Herdr pane IDs to watch when action=start.",
+        maxItems: 32,
+        minItems: 1,
+      }),
+    ),
+    timeoutSeconds: Type.Optional(
+      Type.Number({
+        description: "Optional overall timeout. The wait stays active when omitted.",
+        maximum: 2_000_000,
+        minimum: 1,
+      }),
+    ),
+    wake: Type.Optional(
+      StringEnum(["agent", "notify"] as const, {
+        description:
+          "Wake the agent with the event, or only show a notification. Defaults to agent.",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+type PingWaitParameters = Static<typeof pingWaitParameters>;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -144,7 +197,7 @@ async function runHerdrJson(args: string[], options: { signal?: AbortSignal; tim
   };
 }
 
-function toolText(text: string, details: JsonRecord = {}) {
+function toolText(text: string, details: unknown = {}) {
   return {
     content: [{ type: "text" as const, text }],
     details,
@@ -427,7 +480,227 @@ async function showEditor(ctx: { ui: { editor: (title: string, text: string) => 
   await ctx.ui.editor(title, text);
 }
 
+interface PingWaitRecord {
+  readonly actor: ReturnType<typeof createPingWaitActor>;
+  readonly controller: AbortController;
+  completion: Promise<void>;
+  finishedAt?: number;
+  status: PingWaitStatus;
+}
+
+interface PingWaitReceipt {
+  readonly event?: JsonRecord;
+  readonly failure?: string;
+  readonly finishedAt?: string;
+  readonly id: string;
+  readonly label: string;
+  readonly paneIds: readonly string[];
+  readonly startedAt: string;
+  readonly status: PingWaitStatus;
+  readonly wake: "agent" | "notify";
+}
+
+function toPingWaitReceipt(record: PingWaitRecord): PingWaitReceipt {
+  const context = record.actor.getSnapshot().context as PingWaitContext;
+  return {
+    event: context.event,
+    failure: context.failure,
+    finishedAt:
+      record.finishedAt === undefined
+        ? undefined
+        : new Date(record.finishedAt).toISOString(),
+    id: context.id,
+    label: context.label,
+    paneIds: context.paneIds,
+    startedAt: new Date(context.startedAt).toISOString(),
+    status: record.status,
+    wake: context.wake,
+  };
+}
+
+function pingWaitReceiptText(receipt: PingWaitReceipt): string {
+  const lines = [
+    `Herdr ping wait ${receipt.id}: ${receipt.status}`,
+    `Label: ${receipt.label}`,
+    `Panes: ${receipt.paneIds.join(", ")}`,
+  ];
+  if (receipt.failure) lines.push(`Failure: ${receipt.failure}`);
+  if (receipt.event) lines.push(`Event: ${JSON.stringify(receipt.event)}`);
+  return lines.join("\n");
+}
+
 export default function bellwetherExtension(pi: ExtensionAPI) {
+  const pingWaits = new Map<string, PingWaitRecord>();
+  let currentContext: ExtensionContext | undefined;
+  let shuttingDown = false;
+
+  const finishPingWait = (record: PingWaitRecord, status: Exclude<PingWaitStatus, "running">) => {
+    if (record.status !== "running") return;
+    record.status = status;
+    record.finishedAt = Date.now();
+    if (shuttingDown || status === "cancelled") return;
+
+    const receipt = toPingWaitReceipt(record);
+    pi.appendEntry("herdr-ping-wait-finished", receipt);
+
+    const summary = pingWaitReceiptText(receipt);
+    if (receipt.wake === "notify") {
+      currentContext?.ui.notify(
+        `${receipt.label}: ${receipt.status}`,
+        receipt.status === "matched" ? "info" : "warning",
+      );
+      return;
+    }
+
+    const instruction =
+      receipt.status === "matched"
+        ? "A Herdr pane event arrived. Inspect the event and target output before continuing. A turn_ended event means settled, not necessarily finished."
+        : `The Herdr ping wait ${receipt.status}. Inspect the receipt and decide what to do next.`;
+    pi.sendMessage(
+      {
+        content: `${instruction}\n\n${summary}`,
+        customType: "herdr-ping-wait",
+        details: receipt,
+        display: true,
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  };
+
+  const startPingWait = async (
+    params: PingWaitParameters,
+    ctx: ExtensionContext,
+  ): Promise<PingWaitRecord> => {
+    if (ctx.mode === "print" || ctx.mode === "json") {
+      throw new Error(
+        "herdr_ping_wait requires a long-lived interactive or RPC Pi process",
+      );
+    }
+    if (!params.paneIds || params.paneIds.length === 0) {
+      throw new Error("paneIds is required for action=start");
+    }
+    const activeCount = [...pingWaits.values()].filter(
+      (record) => record.status === "running",
+    ).length;
+    if (activeCount >= MAX_ACTIVE_PING_WAITS) {
+      throw new Error(
+        `herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`,
+      );
+    }
+
+    const id = randomUUID().slice(0, 8);
+    const sessionId = ctx.sessionManager.getSessionId().replaceAll(/[^A-Za-z0-9_-]/g, "-");
+    const input: PingWaitInput = {
+      cursorPath: join(
+        homedir(),
+        ".local",
+        "state",
+        "herdr-pings",
+        `pi-bellwether-${sessionId}.cursor.json`,
+      ),
+      id,
+      label: params.label?.trim() || params.paneIds.join(", "),
+      paneIds: [...new Set(params.paneIds)],
+      startedAt: Date.now(),
+      timeoutMs:
+        params.timeoutSeconds === undefined
+          ? undefined
+          : params.timeoutSeconds * 1_000,
+      wake: params.wake ?? "agent",
+    };
+
+    const binary = await resolvePingWaitBinary();
+    const actor = createPingWaitActor(input);
+    const controller = new AbortController();
+    const record: PingWaitRecord = {
+      actor,
+      completion: Promise.resolve(),
+      controller,
+      status: "running",
+    };
+    pingWaits.set(id, record);
+
+    actor.subscribe((snapshot) => {
+      if (snapshot.status !== "done") return;
+      const status = terminalPingWaitStatus(snapshot.value);
+      if (status) finishPingWait(record, status);
+    });
+    actor.start();
+
+    record.completion = runPingWait(binary, input, controller.signal).then(
+      (outcome) => actor.send(outcome),
+      (error) =>
+        actor.send({
+          failure: error instanceof Error ? error.message : String(error),
+          type: "FAIL",
+        }),
+    );
+
+    pi.appendEntry("herdr-ping-wait-started", {
+      id,
+      label: input.label,
+      paneIds: input.paneIds,
+      startedAt: new Date(input.startedAt).toISOString(),
+      timeoutMs: input.timeoutMs,
+      wake: input.wake,
+    });
+    return record;
+  };
+
+  pi.registerTool({
+    name: "herdr_ping_wait",
+    label: "Wait for Herdr Ping",
+    description:
+      "Start, list, inspect, or cancel a non-blocking wait for the next event from one or more Herdr pane spools. Active waits stop when this Pi session shuts down.",
+    promptSnippet:
+      "Start or inspect background Herdr pane-event waits without blocking the current turn.",
+    promptGuidelines: [
+      "Use herdr_ping_wait instead of blocking bash, herdr agent wait, or pane wait-output when Pi should resume after a worker event.",
+      "Treat herdr_ping_wait turn_ended events as settled signals, not proof that the worker finished its task.",
+      "Cancel herdr_ping_wait watches when their worker panes no longer matter.",
+    ],
+    parameters: pingWaitParameters,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      currentContext = ctx;
+      if (params.action === "start") {
+        const record = await startPingWait(params, ctx);
+        const receipt = toPingWaitReceipt(record);
+        return toolText(
+          `Started Herdr ping wait ${receipt.id} (${receipt.label}) without blocking this turn.`,
+          receipt,
+        );
+      }
+
+      if (params.action === "list") {
+        const receipts = [...pingWaits.values()].map(toPingWaitReceipt);
+        const text =
+          receipts.length === 0
+            ? "No Herdr ping waits owned by this Pi session."
+            : receipts
+                .map(
+                  (receipt) =>
+                    `${receipt.id}\t${receipt.status}\t${receipt.label}\t${receipt.paneIds.join(",")}`,
+                )
+                .join("\n");
+        return toolText(text, { waits: receipts });
+      }
+
+      if (!params.id) {
+        throw new Error(`id is required for action=${params.action}`);
+      }
+      const record = pingWaits.get(params.id);
+      if (!record) throw new Error(`unknown Herdr ping wait: ${params.id}`);
+
+      if (params.action === "cancel" && record.status === "running") {
+        record.actor.send({ type: "CANCEL" });
+        record.controller.abort();
+      }
+
+      const receipt = toPingWaitReceipt(record);
+      return toolText(pingWaitReceiptText(receipt), receipt);
+    },
+  });
+
   pi.registerTool({
     name: "herdr_status",
     label: "Herdr Status",
@@ -697,6 +970,25 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    currentContext = ctx;
+  });
+
+  pi.on("session_shutdown", async () => {
+    shuttingDown = true;
+    const active = [...pingWaits.values()].filter(
+      (record) => record.status === "running",
+    );
+    for (const record of active) {
+      record.actor.send({ type: "CANCEL" });
+      record.controller.abort();
+    }
+    await Promise.allSettled(active.map((record) => record.completion));
+    for (const record of active) record.actor.stop();
+    pingWaits.clear();
+    currentContext = undefined;
   });
 
   pi.registerCommand("herdr-stop", {
