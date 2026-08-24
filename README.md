@@ -1,5 +1,5 @@
 > [!IMPORTANT]
-> Archived on 2026-08-24. The active Herdr control surface now lives in `pi-herdr` 1.0.0 and the Herdr workflow control plane. `herdr-pings` remains the degraded crash and turn fallback.
+> Retired on 2026-08-24. The active Herdr control surface now lives in `pi-herdr` 1.0.0 and the Herdr workflow control plane. `herdr-pings` remains the degraded crash and turn fallback.
 
 # Bellwether 🐏🔔
 
