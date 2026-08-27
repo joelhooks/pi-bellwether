@@ -8,7 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import bellwetherExtension, {
   agentStartClientTimeoutMs,
-} from "./pi-bellwether.ts";
+} from "../extensions/pi-bellwether.ts";
 import {
   agentInfo,
   paneInfo,
@@ -16,7 +16,7 @@ import {
   startFakeHerdrServer,
   success,
   type FakeHerdrServer,
-} from "../src/test-support.ts";
+} from "./test-support.ts";
 
 const temporaryDirectories: string[] = [];
 const servers: FakeHerdrServer[] = [];
