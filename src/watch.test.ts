@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { afterEach, describe, expect, test } from "vitest";
 
 import { createHerdrClient } from "./herdr-client.ts";
 import type { HerdrClient } from "./herdr-client.ts";
@@ -49,7 +50,7 @@ async function waitForTerminal(
   const deadline = Date.now() + timeoutMs;
   let receipt = status();
   while (receipt.status === "running" && Date.now() < deadline) {
-    await Bun.sleep(2);
+    await sleep(2);
     receipt = status();
   }
   return receipt;
@@ -58,7 +59,7 @@ async function waitForTerminal(
 describe("Herdr watch XState lifecycle", () => {
   test("moves starting to running and wakes exactly once on match", async () => {
     const server = await startFakeHerdrServer(async (request, socket) => {
-      await Bun.sleep(10);
+      await sleep(10);
       socket.write(
         success(request, {
           type: "agent_info",
@@ -83,7 +84,7 @@ describe("Herdr watch XState lifecycle", () => {
     expect(started.status).toBe("running");
     expect(started.phase).toBe("starting");
 
-    while (server.requests.length === 0) await Bun.sleep(1);
+    while (server.requests.length === 0) await sleep(1);
     const running = registry.status(started.id);
     expect(running.status).toBe("running");
     expect(running.phase).toBe("running");
@@ -139,7 +140,7 @@ describe("Herdr watch XState lifecycle", () => {
       { kind: "pane_output", pane: "w1:p1", match: "DONE", wake: "agent" },
       { mode: "tui" },
     );
-    while (server.requests.length === 0) await Bun.sleep(1);
+    while (server.requests.length === 0) await sleep(1);
     expect(server.requests[0]?.params).toMatchObject({
       source: "recent_unwrapped",
       match: { type: "substring", value: "DONE" },
@@ -149,7 +150,7 @@ describe("Herdr watch XState lifecycle", () => {
     expect(cancelled.status).toBe("cancelled");
     const deadline = Date.now() + 1_000;
     while (server.closedConnections() === 0 && Date.now() < deadline) {
-      await Bun.sleep(1);
+      await sleep(1);
     }
     expect(server.closedConnections()).toBe(1);
     expect(messages).toHaveLength(0);
@@ -169,12 +170,12 @@ describe("Herdr watch XState lifecycle", () => {
       { kind: "pane_output", pane: "w1:p2", match: "DONE", wake: "agent" },
       { mode: "tui" },
     );
-    while (server.requests.length < 2) await Bun.sleep(1);
+    while (server.requests.length < 2) await sleep(1);
 
     await registry.shutdown();
     const deadline = Date.now() + 1_000;
     while (server.closedConnections() < 2 && Date.now() < deadline) {
-      await Bun.sleep(1);
+      await sleep(1);
     }
 
     expect(server.connections()).toBe(2);

@@ -1,8 +1,9 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import bellwetherExtension, {
@@ -639,7 +640,7 @@ test("herdr_ping_wait remains an explicit degraded fallback", async () => {
   expect(result.content[0]?.text).toContain("degraded");
   expect(messages).toHaveLength(0);
   const deadline = Date.now() + 2_000;
-  while (messages.length === 0 && Date.now() < deadline) await Bun.sleep(20);
+  while (messages.length === 0 && Date.now() < deadline) await sleep(20);
   expect(messages).toHaveLength(1);
   await handlers.get("session_shutdown")?.();
 });

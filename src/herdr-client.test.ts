@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { Effect } from "effect";
+import { afterEach, describe, expect, test } from "vitest";
 
 import {
   createHerdrClient,
@@ -141,12 +143,12 @@ describe("Herdr Effect client", () => {
       { signal: controller.signal },
     ).catch(() => undefined);
 
-    while (server.requests.length === 0) await Bun.sleep(1);
+    while (server.requests.length === 0) await sleep(1);
     controller.abort();
     await running;
     const deadline = Date.now() + 1_000;
     while (server.closedConnections() === 0 && Date.now() < deadline) {
-      await Bun.sleep(1);
+      await sleep(1);
     }
 
     expect(server.connections()).toBe(1);

@@ -7,7 +7,7 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "ES2022",
-    "types": ["bun", "node"]
+    "types": ["node"]
   },
   "include": ["extensions/**/*.ts", "src/**/*.ts"]
 }
