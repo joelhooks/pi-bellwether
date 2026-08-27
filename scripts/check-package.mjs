@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 const approved = [
   "LICENSE",
@@ -12,6 +12,15 @@ const approved = [
   "src/ping-wait.ts",
   "src/watch.ts",
 ].sort();
+
+const extensionSources = readdirSync("extensions")
+  .filter((path) => path.endsWith(".ts"))
+  .sort();
+if (JSON.stringify(extensionSources) !== JSON.stringify(["pi-bellwether.ts"])) {
+  throw new Error(
+    `Pi loads every TypeScript file in extensions; expected only pi-bellwether.ts, got ${JSON.stringify(extensionSources)}`,
+  );
+}
 
 const raw = execFileSync(
   "npm",
