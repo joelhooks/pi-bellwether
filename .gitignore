@@ -1,4 +1,5 @@
 node_modules/
+.agent-sources/
 .DS_Store
 *.log
 /tmp/

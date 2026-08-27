@@ -2,20 +2,41 @@
 
 ## Project shape
 
-Bellwether 🐏🔔 (`@joelhooks/pi-bellwether`) is a Pi package that exposes generic Herdr runtime management as slash commands and LLM tools.
+Bellwether 🐏🔔 (`@joelhooks/pi-bellwether`) is the owned Pi package for generic Herdr runtime control.
 
-Generic Herdr control belongs here. Product-specific loop behavior belongs in downstream loop extensions that depend on or adapt this package.
+Product-specific workflow policy belongs downstream. `herdr-workflow` owns durable leases, generations, claims, and receipts.
 
-## Extension rules
+## Runtime rules
 
-- Keep startup side-effect free. Do not start Herdr or background daemons during extension load.
-- Start long-lived waits only from `herdr_ping_wait({ action: "start" })`. Return immediately, track the exact child process, and abort it during `session_shutdown` or explicit cancellation.
-- Keep bounded Herdr control calls synchronous. Any future `agent wait`, `prompt --wait`, or `pane wait-output` tool surface must use the same background-watch contract instead of blocking a Pi turn.
-- Resolve the `herdr` and `herdr-ping-wait` binaries lazily inside command/tool execution.
-- Use `execFile` with argv arrays, not shell command strings.
-- Tool `details` must stay cloneable plain data.
-- Read/list before send/stop when target identity is unclear.
-- Stop/close stays guarded: slash command confirmation and `herdr_stop_agent({ confirm: true })`.
+- Keep extension startup side-effect free. Resolve sockets only during commands, tools, or explicit watch starts.
+- Use one newline-delimited JSON request per Herdr socket. Never pool Herdr sockets.
+- Effect 4.0.0-beta.99 owns path resolution, framing, Schema decoding, typed errors, timeouts, interruption, and socket cleanup.
+- XState 5.32.5 owns watch lifecycle only: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
+- Each `herdr_watch` owns one direct wait socket. It never shells out or starts a child process.
+- `herdr_agent prompt` is submit-only. It includes no wait options and starts no implicit watch.
+- Use Herdr `error.code`. Do not classify errors from message text.
+- Cancel and `session_shutdown` close exact owned sockets and suppress late wakes.
+- Tool `details` must remain structured-clone-safe plain data.
+- Keep `herdr_ping_wait` visibly degraded and isolated. Only explicit `action=start` may spawn its child.
+
+## Intercom
+
+Register `bellwether/herdr/v1` through `pi.events`. Do not statically import pi-intercom at runtime.
+
+Use `ownerEligible: false`. Publish compact capability, binding, and watch hints only. Prompts, output, transcripts, workflow bodies, and ownership state stay off the bus.
+
+Lost bus traffic may delay a hint. It cannot lose or invent Herdr or workflow truth.
+
+## Public tools
+
+- `herdr_layout`
+- `herdr_pane`
+- `herdr_agent`
+- `herdr_watch`
+
+`herdr_ping_wait` is a separate degraded fallback.
+
+No LLM schema may expose `wait`, `wait_output`, or `prompt_settle`.
 
 ## Checks
 
@@ -24,5 +45,7 @@ npm install --ignore-scripts
 npm run check
 npm test
 npm run smoke
+npm run pack:check
+npm audit --omit=dev
 pi-notes brain check
 ```

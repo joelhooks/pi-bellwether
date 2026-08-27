@@ -1,53 +1,55 @@
 ---
 name: pi-bellwether
-description: Manage Herdr agents and panes from Pi with Bellwether 🐏🔔. Use when listing Herdr agents, reading pane output, waiting asynchronously for pane events, sending/submitting text to another agent, focusing panes, starting managed Herdr processes, or safely closing Herdr panes.
+description: Control Herdr workspaces, tabs, panes, coding agents, and non-blocking direct-socket watches from Pi. Use when Joel explicitly asks to inspect or control Herdr, create pane topology, prompt a Herdr agent, read output, or arm an agent-state or pane-output watch.
 disable-model-invocation: true
 ---
 
 # Pi Bellwether 🐏🔔
 
-Use this skill when Pi needs to coordinate with Herdr-managed terminal agents/panes.
+Bellwether owns generic Herdr control. `herdr-workflow` owns durable workflow truth.
 
-## Operating rules
+## Flow
 
-- Check `herdr_status` first when Herdr commands fail, especially for client/server protocol mismatch.
-- Use `herdr_list_agents` before targeting an agent unless the user gave an exact terminal id, pane id, or unique agent label.
-- Use `herdr_read_agent` before sending follow-up text if you are not sure what the target is doing.
-- `herdr_send_message` writes literal text only. Use `herdr_submit` afterward to press Enter.
-- `herdr_stop_agent` closes a terminal pane. Only call it when the user explicitly asks to stop/close the target, and set `confirm: true` only after checking the target.
-- Use `herdr_ping_wait({ action: "start" })` for long waits. It returns immediately and wakes Pi after an event, timeout, or failure.
-- Treat `turn_ended` as a settled signal. Read the target and find its `DONE` receipt before calling the work finished.
-- Cancel waits that no longer matter. Bellwether aborts all remaining waits when the Pi session shuts down.
-- Prefer stable Herdr ids (`terminal_id` or `pane_id`) over broad names like `pi`, because multiple Pi agents are common.
+1. Use `herdr_layout` to inspect or create topology.
+2. Use `herdr_agent start` only with an existing available pane.
+3. Use `herdr_agent prompt` to submit one prompt. It returns after Herdr accepts the prompt.
+4. Arm `herdr_watch` only when a separate external condition matters.
+5. Inspect the terminal receipt and target output before claiming completion.
+6. Cancel watches that no longer matter.
 
-## Slash commands
+## Tools
 
-- `/herdr-status`
-- `/herdr-agents [--panes]`
-- `/herdr-start <name> -- <cmd ...>`
-- `/herdr-send <target> <message>`
-- `/herdr-submit <target>`
-- `/herdr-read <target> [--lines N] [--source visible|recent|recent-unwrapped] [--ansi]`
-- `/herdr-focus <target>`
-- `/herdr-stop <target>`
+- `herdr_layout`: current, workspace, tab, pane list/layout/split actions.
+- `herdr_pane`: get, run, read, send text/keys, guarded close.
+- `herdr_agent`: list, get, start, prompt, read, send keys, focus, rename.
+- `herdr_watch`: start, list, status, cancel for `agent_state` and `pane_output`.
 
-## Tool flow examples
+The action tools contain no wait path. `herdr_agent prompt` starts no watch.
 
-Send a prompt to a known target:
+## Watch receipts
 
-1. `herdr_read_agent({ target })`
-2. `herdr_send_message({ target, message })`
-3. `herdr_submit({ target })`
+`herdr_watch start` returns a running receipt immediately. Its XState lifecycle is:
 
-Wait for worker activity without blocking Pi:
+```text
+starting -> running -> matched | timedOut | targetGone | failed | cancelled
+```
 
-1. `herdr_ping_wait({ action: "start", paneIds: [paneId], label: "worker" })`
-2. Return control. Bellwether wakes Pi when an event arrives.
-3. `herdr_read_agent({ target: paneId })`
-4. `herdr_ping_wait({ action: "cancel", id })` if the wait is no longer useful.
+Wake policies:
 
-Stop a target safely:
+- `agent`: one follow-up turn at most.
+- `notify`: UI notification only.
+- `silent`: receipt only.
 
-1. `herdr_list_agents({ includePanes: true })`
-2. `herdr_read_agent({ target, lines: 20 })`
-3. `herdr_stop_agent({ target, confirm: true })`
+A lifecycle match is diagnostic. It does not prove a worker finished its task.
+
+## Close guard
+
+Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and refuses the pane that hosts Pi.
+
+## Intercom
+
+Bellwether publishes compact live hints through `bellwether/herdr/v1` when pi-intercom supports `extension-bus-v1`. Targeted wake hints trigger one hidden typed Pi follow-up. Workflow-receipt hints only tell the receiver to reread durable `herdr-workflow` state. Herdr and `herdr-workflow` remain authority.
+
+## Degraded fallback
+
+Use `herdr_ping_wait` only for crash or turn events that the direct watch kinds cannot express. It starts a child process. `herdr_watch` does not.

@@ -1,62 +1,94 @@
-> [!IMPORTANT]
-> Retired on 2026-08-24. The active Herdr control surface now lives in `pi-herdr` 1.0.0 and the Herdr workflow control plane. `herdr-pings` remains the degraded crash and turn fallback.
-
 # Bellwether 🐏🔔
 
-Bellwether is a Pi package for managing [Herdr](https://herdr.dev) agents, panes, and runtime sessions from Pi.
+Bellwether (`@joelhooks/pi-bellwether`) is the owned Pi package for generic Herdr runtime control.
 
-This is deliberately generic runtime plumbing. Product-specific loop control should depend on this package or adapt its commands/tools, not bury Herdr control inside a loop-specific extension.
+It replaces the loaded `pi-herdr` fork after a separate settings cutover. The fork remains rollback source. Bellwether does not depend on or edit it.
 
-## Install
+## Runtime
 
-Install from GitHub:
+Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only when a tool or command runs.
 
-```bash
-pi install git:github.com/joelhooks/pi-bellwether
-```
+- Effect 4.0.0-beta.99 owns socket path resolution, one newline-delimited JSON request per socket, Schema decoding, typed errors, timeouts, interruption, and cleanup.
+- XState 5.32.5 owns each watch lifecycle: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
+- Each watch owns one direct Herdr wait socket. Watches do not shell out, spawn `herdr`, or pool connections.
+- Herdr `error.code` determines timeout and target-loss states. Error prose does not.
 
-Or use a local checkout:
+`herdr_ping_wait` remains an explicit degraded crash and turn fallback. It is the only child-process wait path. `herdr_watch` never calls it.
 
-```bash
-pi install /path/to/pi-bellwether
-```
+## Structured tools
 
-For a one-off smoke test without installing:
+### `herdr_layout`
 
-```bash
-PI_OFFLINE=1 pi -e /path/to/pi-bellwether --help
-```
+Actions:
+
+- `current`
+- `workspace_list`, `workspace_create`, `workspace_focus`
+- `tab_list`, `tab_create`, `tab_focus`
+- `pane_list`, `pane_layout`, `pane_split`
+
+### `herdr_pane`
+
+Actions: `get`, `run`, `read`, `send_text`, `send_keys`, `close`.
+
+There is no `wait_output` action. `close` requires `confirm: true` and refuses the pane that hosts the current Pi process.
+
+### `herdr_agent`
+
+Actions: `list`, `get`, `start`, `prompt`, `read`, `send_keys`, `focus`, `rename`.
+
+There is no `wait` action or `wait` parameter. `prompt` sends one bounded `agent.prompt` request with no wait options. It starts no implicit watch.
+
+### `herdr_watch`
+
+Actions: `start`, `list`, `status`, `cancel`.
+
+Initial kinds:
+
+- `agent_state`
+- `pane_output`
+
+`start` returns a cloneable running receipt immediately. Wake policies are `agent`, `notify`, and `silent`. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
+
+The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. `src/watch.ts` keeps a typed future adapter seam without duplicating workflow leases or state.
+
+## Pi intercom
+
+Bellwether optionally registers `bellwether/herdr/v1` through `pi.events` and pi-intercom's `extension-bus-v1` contract.
+
+- Registration uses `ownerEligible: false`.
+- Traffic contains only capability, pane/session binding, watch lifecycle, targeted wake, and workflow-receipt hints.
+- Traffic contains no prompts, terminal output, transcripts, socket paths, or workflow bodies.
+- Recipients filter target session/pane and deduplicate the newest 256 event IDs.
+- Join, leave, presence, and reconnect events republish bindings and active watch hints.
+- A targeted wake invokes one injected local callback. Pi has no wake-only primitive, so the adapter emits a hidden typed custom follow-up (`bellwether-intercom-wake`) to trigger the turn. This custom message enters Pi context but carries only event, source session, and optional watch IDs.
+- Missing or unsupported pi-intercom leaves local Herdr tools and watches unchanged.
+
+Intercom messages are hints. Herdr and `herdr-workflow` remain authority.
 
 ## Slash commands
 
-- `/herdr-status` — show Herdr client/server status.
-- `/herdr-agents [--panes]` — list detected Herdr agents, optionally with panes.
-- `/herdr-start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <cmd ...>` — start a managed agent/process.
-- `/herdr-send <target> <message>` — send literal text to a Herdr agent target.
-- `/herdr-submit <target>` — press Enter in the target agent's pane.
-- `/herdr-read <target> [--lines N] [--source visible|recent|recent-unwrapped] [--ansi]` — read recent output.
-- `/herdr-focus <target>` — focus an agent target.
-- `/herdr-stop <target>` — close the target agent's pane after confirmation.
+Bellwether keeps bounded human commands:
 
-Targets are whatever `herdr agent` accepts: terminal ids, pane ids, unique agent names, detected/reported labels, and legacy pane ids.
+- `/herdr-status`
+- `/herdr-agents`
+- `/herdr-read <agent target>`
+- `/herdr-focus <agent target>`
+- `/herdr-stop <agent target>`
 
-## LLM tools
+The old split send/submit and combined start commands are gone.
 
-- `herdr_status`
-- `herdr_list_agents`
-- `herdr_start_agent`
-- `herdr_send_message`
-- `herdr_submit`
-- `herdr_read_agent`
-- `herdr_focus_agent`
-- `herdr_stop_agent`
-- `herdr_ping_wait`
+## Install and smoke test
 
-`herdr_ping_wait` starts a session-owned background wait for the next event from one or more Herdr pane spools. Its `start` action returns immediately. When an event arrives, it wakes Pi with a follow-up receipt. It also supports `list`, `status`, and `cancel`. The external [`herdr-ping-wait`](https://github.com/joelhooks/herdr-pings) executable must be installed first.
+```bash
+pi install git:github.com/joelhooks/pi-bellwether
+PI_OFFLINE=1 pi -e /path/to/pi-bellwether --help
+```
 
-Long waits belong in `herdr_ping_wait`, not a blocking tool call or shell command. Bounded control operations such as status, list, read, focus, send, start, and stop remain synchronous. A `turn_ended` event means the agent settled; it does not prove the task finished.
+## Settings cutover
 
-`herdr_stop_agent` requires `confirm: true` because it closes a terminal pane. Read/list first, stop second. FFS, don't let the robot blindly close terminals.
+Do not change global Pi settings while building or reviewing this package.
+
+After parity review, replace the `pi-extensions/packages/pi-herdr` entry in `~/.pi/agent/settings.json` with the reviewed Bellwether checkout or package reference. Start a fresh Pi session, verify the four structured tools, run one bounded read and one cancellable watch, then keep the fork unloaded as rollback.
 
 ## Development
 
@@ -65,7 +97,7 @@ npm install --ignore-scripts
 npm run check
 npm test
 npm run smoke
+npm run pack:check
+npm audit --omit=dev
 pi-notes brain check
 ```
-
-The extension uses `execFile`, not shell strings, so command arguments are passed without shell injection. It lazily resolves the `herdr` binary when a command/tool runs, so Pi startup does not fail on machines without Herdr installed.

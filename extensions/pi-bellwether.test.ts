@@ -2,20 +2,35 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import bellwetherExtension from "./pi-bellwether.ts";
+import bellwetherExtension, {
+  agentStartClientTimeoutMs,
+} from "./pi-bellwether.ts";
+import {
+  agentInfo,
+  paneInfo,
+  resultForMethod,
+  startFakeHerdrServer,
+  success,
+  type FakeHerdrServer,
+} from "../src/test-support.ts";
 
 const temporaryDirectories: string[] = [];
+const servers: FakeHerdrServer[] = [];
 const originalWaiterBinary = process.env.HERDR_PING_WAIT_BIN;
+const originalSocketPath = process.env.HERDR_SOCKET_PATH;
+const originalPaneId = process.env.HERDR_PANE_ID;
 
 afterEach(async () => {
-  if (originalWaiterBinary === undefined) {
-    delete process.env.HERDR_PING_WAIT_BIN;
-  } else {
-    process.env.HERDR_PING_WAIT_BIN = originalWaiterBinary;
-  }
+  if (originalWaiterBinary === undefined) delete process.env.HERDR_PING_WAIT_BIN;
+  else process.env.HERDR_PING_WAIT_BIN = originalWaiterBinary;
+  if (originalSocketPath === undefined) delete process.env.HERDR_SOCKET_PATH;
+  else process.env.HERDR_SOCKET_PATH = originalSocketPath;
+  if (originalPaneId === undefined) delete process.env.HERDR_PANE_ID;
+  else process.env.HERDR_PANE_ID = originalPaneId;
+  await Promise.all(servers.splice(0).map((server) => server.stop()));
   await Promise.all(
     temporaryDirectories.splice(0).map((path) =>
       rm(path, { force: true, recursive: true }),
@@ -25,9 +40,65 @@ afterEach(async () => {
 
 interface TestTool {
   readonly name: string;
+  readonly parameters: Record<string, unknown>;
   readonly execute: (...args: unknown[]) => Promise<{
     readonly content: readonly { readonly text: string }[];
+    readonly details?: unknown;
   }>;
+}
+
+class EventBus {
+  readonly emitted: Array<{ event: string; payload: unknown }> = [];
+  private readonly listeners = new Map<string, Array<(payload: unknown) => void>>();
+  emit(event: string, payload: unknown) {
+    this.emitted.push({ event, payload });
+    for (const listener of this.listeners.get(event) ?? []) listener(payload);
+  }
+  on(event: string, listener: (payload: unknown) => void) {
+    const listeners = this.listeners.get(event) ?? [];
+    listeners.push(listener);
+    this.listeners.set(event, listeners);
+    return () => undefined;
+  }
+}
+
+function harness() {
+  const tools = new Map<string, TestTool>();
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const messages: unknown[] = [];
+  const entries: unknown[] = [];
+  const events = new EventBus();
+  const apiDouble = {
+    appendEntry(type: string, data: unknown) {
+      entries.push({ type, data });
+    },
+    events,
+    on(event: string, handler: (...args: unknown[]) => unknown) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerTool(tool: TestTool) {
+      tools.set(tool.name, tool);
+    },
+    sendMessage(message: unknown) {
+      messages.push(message);
+    },
+  };
+  // SAFETY: the extension factory only uses the methods supplied by this test double.
+  bellwetherExtension(apiDouble as unknown as ExtensionAPI);
+  return { tools, handlers, messages, entries, events };
+}
+
+function context() {
+  return {
+    mode: "tui",
+    sessionManager: { getSessionId: () => "test-session" },
+    ui: {
+      notify() {},
+      editor: async () => undefined,
+      confirm: async () => true,
+    },
+  };
 }
 
 async function waiterExecutable(): Promise<string> {
@@ -47,35 +118,512 @@ setTimeout(() => {
   return path;
 }
 
-test("herdr_ping_wait returns before the waiter event and wakes Pi later", async () => {
-  process.env.HERDR_PING_WAIT_BIN = await waiterExecutable();
+describe("Bellwether public surface", () => {
+  test("registers four structured tools plus the degraded fallback and no legacy tools", () => {
+    const { tools } = harness();
+    expect([...tools.keys()].sort()).toEqual([
+      "herdr_agent",
+      "herdr_layout",
+      "herdr_pane",
+      "herdr_ping_wait",
+      "herdr_watch",
+    ]);
+  });
 
-  const tools = new Map<string, TestTool>();
-  const handlers = new Map<string, (...args: unknown[]) => unknown>();
-  const messages: unknown[] = [];
-  const apiDouble = {
-    appendEntry() {},
-    on(event: string, handler: (...args: unknown[]) => unknown) {
-      handlers.set(event, handler);
-    },
-    registerCommand() {},
-    registerTool(tool: TestTool) {
-      tools.set(tool.name, tool);
-    },
-    sendMessage(message: unknown) {
-      messages.push(message);
-    },
+  test("tool schemas expose no wait, wait action, wait_output, or prompt settlement escape hatch", () => {
+    const { tools } = harness();
+    const agentSchema = tools.get("herdr_agent")?.parameters;
+    const paneSchema = tools.get("herdr_pane")?.parameters;
+    const watchSchema = tools.get("herdr_watch")?.parameters;
+    if (!agentSchema || !paneSchema || !watchSchema) throw new Error("tools missing");
+
+    const schemas = JSON.stringify({ agentSchema, paneSchema, watchSchema });
+    expect(schemas).not.toContain('"wait"');
+    expect(schemas).not.toContain("wait_output");
+    expect(schemas).not.toContain("prompt_settle");
+    expect(schemas).not.toContain("workflow_receipt");
+  });
+
+  test("prompt sends one bounded request with no wait options and starts no watch", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(
+        success(request, {
+          type: "agent_prompted",
+          agent: agentInfo({ agent_status: "working" }),
+        }),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const prompt = tools.get("herdr_agent");
+    const watch = tools.get("herdr_watch");
+    if (!prompt || !watch) throw new Error("required tools missing");
+
+    const result = await prompt.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Do the bounded task." },
+      undefined,
+      undefined,
+      context(),
+    );
+    const watches = await watch.execute(
+      "call-2",
+      { action: "list" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]).toEqual(
+      expect.objectContaining({
+        method: "agent.prompt",
+        params: { target: "worker", text: "Do the bounded task." },
+      }),
+    );
+    expect(watches.content[0]?.text).toContain("No Herdr watches");
+    expect(() => structuredClone(result.details)).not.toThrow();
+    await handlers.get("session_shutdown")?.();
+  });
+
+  test("accepted targeted intercom wake triggers one hidden typed follow-up", async () => {
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const { handlers, messages, entries, events } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const registration = events.emitted.find(
+      (entry) => entry.event === "intercom:extension-register",
+    )?.payload as
+      | {
+          onReady(channel: unknown): void;
+          onEvent(event: unknown): void;
+        }
+      | undefined;
+    if (!registration) throw new Error("intercom registration missing");
+    registration.onReady({
+      namespace: "bellwether/herdr/v1",
+      snapshot: () => ({ connected: true, supported: true }),
+      publish() {},
+    });
+    const signal = {
+      version: 1,
+      eventId: "wake-1",
+      sourceSessionId: "session-b",
+      targetSessionId: "test-session",
+      targetPaneId: "w1:p1",
+      kind: "wake_hint",
+      watchId: "watch-1",
+    };
+    registration.onEvent({
+      type: "message",
+      fromSessionId: "session-b",
+      payload: signal,
+    });
+    registration.onEvent({
+      type: "message",
+      fromSessionId: "session-b",
+      payload: signal,
+    });
+
+    expect(messages).toEqual([
+      expect.objectContaining({
+        customType: "bellwether-intercom-wake",
+        content: "bellwether_intercom_wake",
+        display: false,
+      }),
+    ]);
+    expect(entries).toContainEqual(
+      expect.objectContaining({ type: "bellwether-intercom-wake-hint" }),
+    );
+    await handlers.get("session_shutdown")?.();
+  });
+});
+
+type ExpectedRequest = {
+  readonly method: string;
+  readonly params: Record<string, unknown>;
+};
+
+async function executeAction(
+  toolName: "herdr_layout" | "herdr_pane" | "herdr_agent",
+  params: Record<string, unknown>,
+) {
+  const server = await startFakeHerdrServer((request, socket) => {
+    let result = resultForMethod(request.method);
+    if (request.method === "pane.current") {
+      result = { type: "pane_current", pane: paneInfo({ pane_id: "w1:p1" }) };
+    } else if (request.method === "pane.get") {
+      result = {
+        type: "pane_info",
+        pane: paneInfo({ pane_id: request.params.pane_id }),
+      };
+    } else if (request.method === "pane.split") {
+      result = { type: "pane_info", pane: paneInfo({ pane_id: "w1:p3" }) };
+    }
+    socket.end(success(request, result));
+  });
+  servers.push(server);
+  process.env.HERDR_SOCKET_PATH = server.socketPath;
+  process.env.HERDR_PANE_ID = "w1:p1";
+  const { tools } = harness();
+  const tool = tools.get(toolName);
+  if (!tool) throw new Error(`${toolName} missing`);
+  const result = await tool.execute(
+    "action-call",
+    params,
+    undefined,
+    undefined,
+    context(),
+  );
+  return { result, requests: server.requests };
+}
+
+describe("Herdr 0.7.5 action parity", () => {
+  const currentRequest: ExpectedRequest = {
+    method: "pane.current",
+    params: { caller_pane_id: "w1:p1" },
   };
-  // SAFETY: the extension factory only uses the five methods supplied above.
-  bellwetherExtension(apiDouble as unknown as ExtensionAPI);
 
+  test("maps every layout action to exact methods and parameters", async () => {
+    const cases: Array<{
+      params: Record<string, unknown>;
+      expected: ExpectedRequest[];
+    }> = [
+      { params: { action: "current" }, expected: [currentRequest] },
+      {
+        params: { action: "workspace_list" },
+        expected: [{ method: "workspace.list", params: {} }],
+      },
+      {
+        params: {
+          action: "workspace_create",
+          cwd: "/tmp/new-workspace",
+          focus: true,
+          label: "New workspace",
+        },
+        expected: [
+          currentRequest,
+          {
+            method: "workspace.create",
+            params: {
+              cwd: "/tmp/new-workspace",
+              focus: true,
+              label: "New workspace",
+              env: {},
+            },
+          },
+        ],
+      },
+      {
+        params: { action: "workspace_focus", workspace: "w2" },
+        expected: [
+          { method: "workspace.focus", params: { workspace_id: "w2" } },
+        ],
+      },
+      {
+        params: { action: "tab_list", workspace: "w1" },
+        expected: [{ method: "tab.list", params: { workspace_id: "w1" } }],
+      },
+      {
+        params: {
+          action: "tab_create",
+          workspace: "w1",
+          cwd: "/tmp/new-tab",
+          label: "New tab",
+          focus: false,
+        },
+        expected: [
+          currentRequest,
+          {
+            method: "tab.create",
+            params: {
+              workspace_id: "w1",
+              cwd: "/tmp/new-tab",
+              focus: false,
+              label: "New tab",
+              env: {},
+            },
+          },
+        ],
+      },
+      {
+        params: { action: "tab_focus", tab: "w1:t2" },
+        expected: [{ method: "tab.focus", params: { tab_id: "w1:t2" } }],
+      },
+      {
+        params: { action: "pane_list", workspace: "w1" },
+        expected: [
+          currentRequest,
+          { method: "pane.list", params: { workspace_id: "w1" } },
+        ],
+      },
+      {
+        params: { action: "pane_layout", pane: "w1:p2" },
+        expected: [{ method: "pane.layout", params: { pane_id: "w1:p2" } }],
+      },
+      {
+        params: {
+          action: "pane_split",
+          pane: "w1:p2",
+          direction: "right",
+          cwd: "/tmp/split",
+          focus: true,
+        },
+        expected: [
+          currentRequest,
+          { method: "pane.get", params: { pane_id: "w1:p2" } },
+          {
+            method: "pane.split",
+            params: {
+              target_pane_id: "w1:p2",
+              direction: "right",
+              cwd: "/tmp/split",
+              focus: true,
+              env: {},
+            },
+          },
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const { result, requests } = await executeAction("herdr_layout", testCase.params);
+      expect(requests.map(({ method, params }) => ({ method, params }))).toEqual(
+        testCase.expected,
+      );
+      expect(() => structuredClone(result.details)).not.toThrow();
+    }
+  });
+
+  test("maps every pane action to exact methods and parameters", async () => {
+    const cases: Array<{
+      params: Record<string, unknown>;
+      expected: ExpectedRequest[];
+    }> = [
+      {
+        params: { action: "get", pane: "w1:p2" },
+        expected: [{ method: "pane.get", params: { pane_id: "w1:p2" } }],
+      },
+      {
+        params: { action: "run", pane: "w1:p2", command: "npm test" },
+        expected: [
+          {
+            method: "pane.send_input",
+            params: { pane_id: "w1:p2", text: "npm test", keys: ["Enter"] },
+          },
+        ],
+      },
+      {
+        params: {
+          action: "read",
+          pane: "w1:p2",
+          source: "recent-unwrapped",
+          lines: 40,
+          format: "ansi",
+        },
+        expected: [
+          {
+            method: "pane.read",
+            params: {
+              pane_id: "w1:p2",
+              source: "recent_unwrapped",
+              lines: 40,
+              format: "ansi",
+              strip_ansi: false,
+            },
+          },
+        ],
+      },
+      {
+        params: { action: "send_text", pane: "w1:p2", text: "hello" },
+        expected: [
+          { method: "pane.send_text", params: { pane_id: "w1:p2", text: "hello" } },
+        ],
+      },
+      {
+        params: { action: "send_keys", pane: "w1:p2", keys: ["ctrl+c"] },
+        expected: [
+          { method: "pane.send_keys", params: { pane_id: "w1:p2", keys: ["ctrl+c"] } },
+        ],
+      },
+      {
+        params: { action: "close", pane: "w1:p2", confirm: true },
+        expected: [
+          currentRequest,
+          { method: "pane.close", params: { pane_id: "w1:p2" } },
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const { result, requests } = await executeAction("herdr_pane", testCase.params);
+      expect(requests.map(({ method, params }) => ({ method, params }))).toEqual(
+        testCase.expected,
+      );
+      expect(() => structuredClone(result.details)).not.toThrow();
+    }
+  });
+
+  test("maps every agent action to exact methods and parameters", async () => {
+    const cases: Array<{
+      params: Record<string, unknown>;
+      expected: ExpectedRequest[];
+    }> = [
+      {
+        params: { action: "list" },
+        expected: [{ method: "agent.list", params: {} }],
+      },
+      {
+        params: { action: "get", target: "worker" },
+        expected: [{ method: "agent.get", params: { target: "worker" } }],
+      },
+      {
+        params: {
+          action: "start",
+          target: "unused",
+          pane: "w1:p2",
+          name: "worker",
+          kind: "pi",
+          agentArgs: ["--no-session"],
+          timeout: 8_000,
+        },
+        expected: [
+          {
+            method: "agent.start",
+            params: {
+              name: "worker",
+              kind: "pi",
+              pane_id: "w1:p2",
+              args: ["--no-session"],
+              timeout_ms: 8_000,
+            },
+          },
+        ],
+      },
+      {
+        params: { action: "prompt", target: "worker", prompt: "Do it." },
+        expected: [
+          { method: "agent.prompt", params: { target: "worker", text: "Do it." } },
+        ],
+      },
+      {
+        params: {
+          action: "read",
+          target: "worker",
+          source: "visible",
+          lines: 20,
+          format: "text",
+        },
+        expected: [
+          {
+            method: "agent.read",
+            params: {
+              target: "worker",
+              source: "visible",
+              lines: 20,
+              format: "text",
+              strip_ansi: true,
+            },
+          },
+        ],
+      },
+      {
+        params: { action: "send_keys", target: "worker", keys: ["esc"] },
+        expected: [
+          { method: "agent.send_keys", params: { target: "worker", keys: ["esc"] } },
+        ],
+      },
+      {
+        params: { action: "focus", target: "worker" },
+        expected: [{ method: "agent.focus", params: { target: "worker" } }],
+      },
+      {
+        params: { action: "rename", target: "worker", name: "renamed" },
+        expected: [
+          { method: "agent.rename", params: { target: "worker", name: "renamed" } },
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const { result, requests } = await executeAction("herdr_agent", testCase.params);
+      expect(requests.map(({ method, params }) => ({ method, params }))).toEqual(
+        testCase.expected,
+      );
+      expect(() => structuredClone(result.details)).not.toThrow();
+    }
+  });
+
+  test("rejects every action-specific missing input before sending its mutation", async () => {
+    const cases: Array<{
+      tool: "herdr_layout" | "herdr_pane" | "herdr_agent";
+      params: Record<string, unknown>;
+      message: string;
+    }> = [
+      { tool: "herdr_layout", params: { action: "workspace_focus" }, message: "workspace is required" },
+      { tool: "herdr_layout", params: { action: "tab_focus" }, message: "tab is required" },
+      { tool: "herdr_pane", params: { action: "run", pane: "w1:p2" }, message: "command is required" },
+      { tool: "herdr_pane", params: { action: "send_text", pane: "w1:p2" }, message: "text is required" },
+      { tool: "herdr_pane", params: { action: "send_keys", pane: "w1:p2" }, message: "keys is required" },
+      { tool: "herdr_pane", params: { action: "close", pane: "w1:p2" }, message: "confirm=true" },
+      { tool: "herdr_agent", params: { action: "get" }, message: "target is required" },
+      { tool: "herdr_agent", params: { action: "start", name: "worker" }, message: "name, kind, and pane" },
+      { tool: "herdr_agent", params: { action: "prompt", target: "worker" }, message: "target and prompt" },
+      { tool: "herdr_agent", params: { action: "read" }, message: "target is required" },
+      { tool: "herdr_agent", params: { action: "send_keys", target: "worker" }, message: "target and keys" },
+      { tool: "herdr_agent", params: { action: "focus" }, message: "target is required" },
+      { tool: "herdr_agent", params: { action: "rename", target: "worker" }, message: "target and name" },
+    ];
+
+    for (const testCase of cases) {
+      await expect(executeAction(testCase.tool, testCase.params)).rejects.toThrow(
+        testCase.message,
+      );
+    }
+  });
+
+  test("refuses to close the current Pi pane", async () => {
+    await expect(
+      executeAction("herdr_pane", {
+        action: "close",
+        pane: "w1:p1",
+        confirm: true,
+      }),
+    ).rejects.toThrow("Refusing to close the pane Pi is running in");
+  });
+
+  test("agent.start gives Herdr its deadline and the socket a transport grace", () => {
+    expect(agentStartClientTimeoutMs()).toBe(35_000);
+    expect(agentStartClientTimeoutMs(8_000)).toBe(13_000);
+  });
+
+  test("session_start records no socket path and opens no Herdr socket", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { handlers, entries } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+
+    expect(server.requests).toHaveLength(0);
+    expect(JSON.stringify(entries)).not.toContain("socketPath");
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        type: "bellwether-capability",
+        data: expect.objectContaining({ directSocket: true }),
+      }),
+    );
+    await handlers.get("session_shutdown")?.();
+  });
+});
+
+test("herdr_ping_wait remains an explicit degraded fallback", async () => {
+  process.env.HERDR_PING_WAIT_BIN = await waiterExecutable();
+  const { tools, handlers, messages } = harness();
   const tool = tools.get("herdr_ping_wait");
   if (!tool) throw new Error("herdr_ping_wait was not registered");
-  const context = {
-    mode: "tui",
-    sessionManager: { getSessionId: () => "test-session" },
-    ui: { notify() {} },
-  };
 
   const startedAt = performance.now();
   const result = await tool.execute(
@@ -83,20 +631,15 @@ test("herdr_ping_wait returns before the waiter event and wakes Pi later", async
     { action: "start", paneIds: ["w1:p1"] },
     undefined,
     undefined,
-    context,
+    context(),
   );
   const elapsedMs = performance.now() - startedAt;
 
   expect(elapsedMs).toBeLessThan(200);
-  expect(result.content[0]?.text).toContain("without blocking this turn");
+  expect(result.content[0]?.text).toContain("degraded");
   expect(messages).toHaveLength(0);
-
   const deadline = Date.now() + 2_000;
-  while (messages.length === 0 && Date.now() < deadline) {
-    await Bun.sleep(20);
-  }
+  while (messages.length === 0 && Date.now() < deadline) await Bun.sleep(20);
   expect(messages).toHaveLength(1);
-  expect(messages[0]).toMatchObject({ customType: "herdr-ping-wait" });
-
   await handlers.get("session_shutdown")?.();
 });

@@ -1,14 +1,36 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { StringEnum } from "@earendil-works/pi-ai";
+import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  truncateTail,
+} from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import { Type } from "typebox";
 import type { Static } from "typebox";
 
+import {
+  createHerdrClient,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  HERDR_TRANSPORT_GRACE_MS,
+} from "../src/herdr-client.ts";
+import type {
+  HerdrClient,
+  HerdrError,
+  HerdrRequest,
+  HerdrResult,
+} from "../src/herdr-client.ts";
+import {
+  createIntercomCoordination,
+  type IntercomCoordination,
+} from "../src/intercom.ts";
 import {
   createPingWaitActor,
   resolvePingWaitBinary,
@@ -20,464 +42,390 @@ import type {
   PingWaitInput,
   PingWaitStatus,
 } from "../src/ping-wait.ts";
-import { access, constants } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import {
+  createWatchRegistry,
+  MAX_WATCH_TIMEOUT_MS,
+  type AgentStatus,
+  type ReadSource,
+  type StartWatchParams,
+  type WatchReceipt,
+} from "../src/watch.ts";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_ACTIVE_PING_WAITS = 32;
-const MAX_BUFFER = 4 * 1024 * 1024;
-const HERDR_BIN_CANDIDATES = [
-  join(homedir(), ".local/bin/herdr"),
-  "/opt/homebrew/bin/herdr",
-  "/usr/local/bin/herdr",
-  "herdr",
-];
+const BELLWETHER_PROTOCOL = 1;
 
-const readSourceEnum = StringEnum(["visible", "recent", "recent-unwrapped"] as const);
-const splitDirectionEnum = StringEnum(["right", "down"] as const);
+export function agentStartClientTimeoutMs(
+  serverTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+): number {
+  return serverTimeoutMs + HERDR_TRANSPORT_GRACE_MS;
+}
+
+type JsonRecord = Record<string, unknown>;
+type SplitDirection = "right" | "down";
+type OutputFormat = "text" | "ansi";
+
+const Action = {
+  layout: [
+    "current",
+    "workspace_list",
+    "workspace_create",
+    "workspace_focus",
+    "tab_list",
+    "tab_create",
+    "tab_focus",
+    "pane_list",
+    "pane_layout",
+    "pane_split",
+  ],
+  pane: ["get", "run", "read", "send_text", "send_keys", "close"],
+  agent: ["list", "get", "start", "prompt", "read", "send_keys", "focus", "rename"],
+  watch: ["start", "list", "status", "cancel"],
+} as const;
+
+const AgentKindEnum = StringEnum(
+  [
+    "pi",
+    "claude",
+    "codex",
+    "gemini",
+    "cursor",
+    "devin",
+    "agy",
+    "cline",
+    "omp",
+    "mastracode",
+    "opencode",
+    "copilot",
+    "kimi",
+    "kiro",
+    "droid",
+    "amp",
+    "grok",
+    "hermes",
+    "kilo",
+    "qodercli",
+    "maki",
+  ] as const,
+  { description: "Supported coding agent kind and canonical executable" },
+);
+const AgentStatusEnum = StringEnum(
+  ["idle", "working", "blocked", "done", "unknown"] as const,
+);
+const ReadSourceEnum = StringEnum(
+  ["visible", "recent", "recent-unwrapped", "detection"] as const,
+);
+const WatchReadSourceEnum = StringEnum(
+  ["visible", "recent", "recent-unwrapped"] as const,
+);
+const OutputFormatEnum = StringEnum(["text", "ansi"] as const);
+const DirectionEnum = StringEnum(["right", "down"] as const);
+const WakeEnum = StringEnum(["agent", "notify", "silent"] as const);
+
+export const herdrLayoutParameters = Type.Object(
+  {
+    action: StringEnum(Action.layout),
+    workspace: Type.Optional(Type.String()),
+    tab: Type.Optional(Type.String()),
+    pane: Type.Optional(Type.String()),
+    label: Type.Optional(Type.String()),
+    direction: Type.Optional(DirectionEnum),
+    cwd: Type.Optional(Type.String()),
+    focus: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+export const herdrPaneParameters = Type.Object(
+  {
+    action: StringEnum(Action.pane),
+    pane: Type.String({ description: "Opaque pane ID returned by herdr_layout" }),
+    command: Type.Optional(Type.String()),
+    text: Type.Optional(Type.String()),
+    keys: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+    source: Type.Optional(ReadSourceEnum),
+    lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
+    format: Type.Optional(OutputFormatEnum),
+    confirm: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+export const herdrAgentParameters = Type.Object(
+  {
+    action: StringEnum(Action.agent),
+    target: Type.Optional(Type.String()),
+    pane: Type.Optional(Type.String()),
+    name: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" })),
+    kind: Type.Optional(AgentKindEnum),
+    agentArgs: Type.Optional(Type.Array(Type.String())),
+    prompt: Type.Optional(Type.String({ maxLength: 900_000 })),
+    timeout: Type.Optional(Type.Integer({ minimum: 3_001, maximum: 300_000 })),
+    source: Type.Optional(ReadSourceEnum),
+    lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
+    format: Type.Optional(OutputFormatEnum),
+    keys: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+    clearName: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+export const herdrWatchParameters = Type.Object(
+  {
+    action: StringEnum(Action.watch),
+    kind: Type.Optional(StringEnum(["agent_state", "pane_output"] as const)),
+    id: Type.Optional(Type.String()),
+    label: Type.Optional(Type.String({ maxLength: 120 })),
+    target: Type.Optional(Type.String()),
+    pane: Type.Optional(Type.String()),
+    match: Type.Optional(Type.String()),
+    regex: Type.Optional(Type.Boolean()),
+    until: Type.Optional(Type.Array(AgentStatusEnum, { minItems: 1 })),
+    timeout: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: MAX_WATCH_TIMEOUT_MS }),
+    ),
+    source: Type.Optional(WatchReadSourceEnum),
+    lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
+    raw: Type.Optional(Type.Boolean()),
+    wake: Type.Optional(WakeEnum),
+  },
+  { additionalProperties: false },
+);
+
 const pingWaitParameters = Type.Object(
   {
     action: StringEnum(["start", "list", "status", "cancel"] as const),
-    id: Type.Optional(
-      Type.String({ description: "Wait ID for status or cancel." }),
-    ),
-    label: Type.Optional(
-      Type.String({ description: "Short label for this wait." }),
-    ),
+    id: Type.Optional(Type.String()),
+    label: Type.Optional(Type.String()),
     paneIds: Type.Optional(
-      Type.Array(Type.String({ pattern: "^w[A-Za-z0-9]+:p[A-Za-z0-9]+$" }), {
-        description: "Herdr pane IDs to watch when action=start.",
-        maxItems: 32,
-        minItems: 1,
-      }),
+      Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
     ),
-    timeoutSeconds: Type.Optional(
-      Type.Number({
-        description: "Optional overall timeout. The wait stays active when omitted.",
-        maximum: 2_000_000,
-        minimum: 1,
-      }),
-    ),
-    wake: Type.Optional(
-      StringEnum(["agent", "notify"] as const, {
-        description:
-          "Wake the agent with the event, or only show a notification. Defaults to agent.",
-      }),
-    ),
+    timeoutSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 2_000_000 })),
+    wake: Type.Optional(StringEnum(["agent", "notify"] as const)),
   },
   { additionalProperties: false },
 );
 
 type PingWaitParameters = Static<typeof pingWaitParameters>;
 
-type JsonRecord = Record<string, unknown>;
-
-type HerdrRun = {
-  stdout: string;
-  stderr: string;
-  args: string[];
-};
-
-type HerdrJsonRun = HerdrRun & {
-  envelope: JsonRecord;
-  result: unknown;
-};
-
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asRecords(value: unknown): JsonRecord[] {
-  return Array.isArray(value) ? value.filter(isRecord) : [];
+function recordField(record: JsonRecord, key: string): JsonRecord {
+  const value = record[key];
+  if (!isRecord(value)) throw new Error(`Herdr result ${record.type} omitted ${key}`);
+  return value;
 }
 
-function getString(record: JsonRecord, key: string) {
+function recordArray(record: JsonRecord, key: string): JsonRecord[] {
+  const value = record[key];
+  if (!Array.isArray(value) || !value.every(isRecord)) {
+    throw new Error(`Herdr result ${record.type} has invalid ${key}`);
+  }
+  return value;
+}
+
+function stringField(record: JsonRecord, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
 }
 
-function getBoolean(record: JsonRecord, key: string) {
+function requiredStringField(record: JsonRecord, key: string): string {
   const value = record[key];
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function shellQuoteForDisplay(value: string) {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function commandForDisplay(args: string[]) {
-  return ["herdr", ...args].map(shellQuoteForDisplay).join(" ");
-}
-
-async function firstExecutable(paths: string[]) {
-  for (const path of paths) {
-    if (path === "herdr") continue;
-    try {
-      await access(path, constants.X_OK);
-      return path;
-    } catch {
-      // Try next candidate.
-    }
+  if (typeof value !== "string") {
+    throw new Error(`Herdr result ${record.type} has invalid ${key}`);
   }
-  return "herdr";
+  return value;
 }
 
-function formatHerdrError(stdout: string, stderr: string, fallback: string) {
-  const trimmedStdout = stdout.trim();
-  if (trimmedStdout.startsWith("{")) {
-    try {
-      const parsed = JSON.parse(trimmedStdout) as unknown;
-      if (isRecord(parsed) && isRecord(parsed.error)) {
-        const code = getString(parsed.error, "code");
-        const message = getString(parsed.error, "message");
-        return [code, message].filter(Boolean).join(": ");
-      }
-    } catch {
-      // Fall through to stderr/fallback.
-    }
+function requiredNumberField(record: JsonRecord, key: string): number {
+  const value = record[key];
+  if (typeof value !== "number") {
+    throw new Error(`Herdr result ${record.type} has invalid ${key}`);
   }
-  return stderr.trim() || trimmedStdout.slice(0, 1000) || fallback;
+  return value;
 }
 
-async function runHerdr(args: string[], options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HerdrRun> {
-  const herdr = await firstExecutable(HERDR_BIN_CANDIDATES);
+function wireReadSource(
+  source: "visible" | "recent" | "recent-unwrapped" | "detection",
+): string {
+  return source === "recent-unwrapped" ? "recent_unwrapped" : source;
+}
 
-  return new Promise((resolve, reject) => {
-    execFile(
-      herdr,
-      args,
-      {
-        signal: options.signal,
-        timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        maxBuffer: MAX_BUFFER,
-      },
-      (error, stdout, stderr) => {
-        const out = String(stdout);
-        const err = String(stderr);
-        if (error) {
-          const nodeError = error as Error & { code?: string | number };
-          const reason = formatHerdrError(out, err, nodeError.message);
-          reject(new Error(`${commandForDisplay(args)} failed${nodeError.code ? ` (${nodeError.code})` : ""}: ${reason}`));
-          return;
-        }
-        resolve({ stdout: out, stderr: err, args });
-      },
-    );
+function formatOutput(output: string): string {
+  const truncation = truncateTail(output, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES,
   });
+  if (!truncation.truncated) return truncation.content;
+  return `[Showing last ${truncation.outputLines} of ${truncation.totalLines} lines]\n${truncation.content}`;
 }
 
-async function runHerdrJson(args: string[], options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HerdrJsonRun> {
-  const run = await runHerdr(args, options);
-  const stdout = run.stdout.trim();
-  let parsed: unknown;
+function summarizeAgent(agent: JsonRecord): string {
+  const pane = requiredStringField(agent, "pane_id");
+  const name =
+    stringField(agent, "name") ??
+    stringField(agent, "display_agent") ??
+    stringField(agent, "agent") ??
+    pane;
+  const status = requiredStringField(agent, "agent_status");
+  const cwd = stringField(agent, "cwd");
+  return `${name}: [${pane}] (${status})${cwd ? ` ${cwd}` : ""}`;
+}
 
-  try {
-    parsed = JSON.parse(stdout);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${commandForDisplay(args)} returned non-JSON output: ${message}\n${stdout.slice(0, 1000)}`);
-  }
+function summarizePane(pane: JsonRecord, currentPaneId?: string): string {
+  const paneId = requiredStringField(pane, "pane_id");
+  const label = stringField(pane, "label") ?? paneId;
+  const status = requiredStringField(pane, "agent_status");
+  const cwd = stringField(pane, "foreground_cwd") ?? stringField(pane, "cwd");
+  const flags = [paneId === currentPaneId ? "current" : undefined, status]
+    .filter(Boolean)
+    .join(", ");
+  return `${label}: [${paneId}]${flags ? ` (${flags})` : ""}${cwd ? ` ${cwd}` : ""}`;
+}
 
-  if (!isRecord(parsed)) {
-    throw new Error(`${commandForDisplay(args)} returned unexpected JSON: ${stdout.slice(0, 1000)}`);
-  }
+function summarizeTab(tab: JsonRecord): string {
+  return `${requiredStringField(tab, "label")}: [${requiredStringField(tab, "tab_id")}]`;
+}
 
-  if (isRecord(parsed.error)) {
-    const code = getString(parsed.error, "code");
-    const message = getString(parsed.error, "message") || "Unknown Herdr error";
-    throw new Error(`${commandForDisplay(args)} failed${code ? ` (${code})` : ""}: ${message}`);
-  }
-
-  return {
-    ...run,
-    envelope: parsed,
-    result: parsed.result,
-  };
+function summarizeWorkspace(workspace: JsonRecord): string {
+  return `${requiredStringField(workspace, "label")}: [${requiredStringField(workspace, "workspace_id")}]`;
 }
 
 function toolText(text: string, details: unknown = {}) {
-  return {
-    content: [{ type: "text" as const, text }],
-    details,
-  };
+  return { content: [{ type: "text" as const, text }], details };
 }
 
-function clampLines(lines: unknown, fallback = 80) {
-  if (typeof lines !== "number" || !Number.isFinite(lines)) return fallback;
-  return Math.max(1, Math.min(500, Math.round(lines)));
+function requestFailure(error: HerdrError): Error {
+  const code = "code" in error ? ` (${error.code})` : "";
+  return new Error(`${error.operation}${code}: ${error.message}`);
 }
 
-function formatAgent(record: JsonRecord, index: number) {
-  const agent = getString(record, "agent") || "terminal";
-  const status = getString(record, "agent_status") || "unknown";
-  const cwd = getString(record, "cwd") || getString(record, "foreground_cwd") || "?";
-  const terminalId = getString(record, "terminal_id") || "?";
-  const paneId = getString(record, "pane_id") || "?";
-  const workspaceId = getString(record, "workspace_id") || "?";
-  const tabId = getString(record, "tab_id") || "?";
-  const focused = getBoolean(record, "focused") ? " focused" : "";
-  return `${index + 1}. ${agent} ${status}${focused}\n   terminal: ${terminalId}\n   pane:     ${paneId}\n   tab:      ${tabId}\n   workspace:${workspaceId}\n   cwd:      ${cwd}`;
+async function runRequest(
+  client: HerdrClient,
+  input: HerdrRequest,
+  signal?: AbortSignal,
+): Promise<HerdrResult> {
+  const outcome = await Effect.runPromise(
+    client.request(input).pipe(
+      Effect.match({
+        onFailure: (error) => ({ ok: false as const, error }),
+        onSuccess: (result) => ({ ok: true as const, result }),
+      }),
+    ),
+    { signal },
+  );
+  if (!outcome.ok) throw requestFailure(outcome.error);
+  return outcome.result;
 }
 
-function resultRecord(run: HerdrJsonRun) {
-  return isRecord(run.result) ? run.result : {};
+async function currentPane(client: HerdrClient, signal?: AbortSignal): Promise<JsonRecord> {
+  const result = await runRequest(
+    client,
+    {
+      method: "pane.current",
+      params: {
+        ...(process.env.HERDR_PANE_ID
+          ? { caller_pane_id: process.env.HERDR_PANE_ID }
+          : {}),
+      },
+    },
+    signal,
+  );
+  return recordField(result, "pane");
 }
 
-function formatAgentList(agentRun: HerdrJsonRun, paneRun?: HerdrJsonRun) {
-  const agents = asRecords(resultRecord(agentRun).agents);
-  const lines = [`Herdr agents (${agents.length})`];
+async function paneById(
+  client: HerdrClient,
+  paneId: string,
+  signal?: AbortSignal,
+): Promise<JsonRecord> {
+  return recordField(
+    await runRequest(client, { method: "pane.get", params: { pane_id: paneId } }, signal),
+    "pane",
+  );
+}
 
-  if (agents.length === 0) {
-    lines.push("No detected agents.");
-  } else {
-    lines.push(...agents.map(formatAgent));
+async function paneLayout(
+  client: HerdrClient,
+  paneId: string,
+  signal?: AbortSignal,
+): Promise<JsonRecord> {
+  return recordField(
+    await runRequest(client, { method: "pane.layout", params: { pane_id: paneId } }, signal),
+    "layout",
+  );
+}
+
+function chooseSplitDirection(layout: JsonRecord, paneId: string): SplitDirection {
+  const pane = recordArray(layout, "panes").find(
+    (candidate) => requiredStringField(candidate, "pane_id") === paneId,
+  );
+  if (!pane) throw new Error(`Herdr layout omitted pane ${paneId}`);
+  const rect = recordField(pane, "rect");
+  const width = requiredNumberField(rect, "width");
+  const height = requiredNumberField(rect, "height");
+  return width >= 80 && width >= height * 2 ? "right" : "down";
+}
+
+function readText(result: HerdrResult): string {
+  return requiredStringField(recordField(result, "read"), "text");
+}
+
+function toStartWatchParams(params: {
+  kind?: "agent_state" | "pane_output";
+  label?: string;
+  target?: string;
+  pane?: string;
+  match?: string;
+  regex?: boolean;
+  until?: AgentStatus[];
+  timeout?: number;
+  source?: ReadSource;
+  lines?: number;
+  raw?: boolean;
+  wake?: "agent" | "notify" | "silent";
+}): StartWatchParams {
+  if (params.kind === "agent_state") {
+    if (!params.target) throw new Error("target is required for agent_state");
+    return {
+      kind: "agent_state",
+      target: params.target,
+      label: params.label,
+      until: params.until,
+      timeoutMs: params.timeout,
+      wake: params.wake,
+    };
   }
-
-  if (paneRun) {
-    const panes = asRecords(resultRecord(paneRun).panes);
-    lines.push("", `Herdr panes (${panes.length})`);
-    if (panes.length === 0) {
-      lines.push("No panes.");
-    } else {
-      lines.push(...panes.map(formatAgent));
+  if (params.kind === "pane_output") {
+    if (!params.pane || !params.match) {
+      throw new Error("pane and match are required for pane_output");
     }
+    return {
+      kind: "pane_output",
+      pane: params.pane,
+      match: params.match,
+      label: params.label,
+      regex: params.regex,
+      source: params.source,
+      lines: params.lines,
+      raw: params.raw,
+      timeoutMs: params.timeout,
+      wake: params.wake,
+    };
   }
-
-  return lines.join("\n");
+  throw new Error("kind is required for action=start");
 }
 
-function prettyResult(run: HerdrJsonRun) {
-  return JSON.stringify(run.result ?? run.envelope, null, 2);
-}
-
-async function listAgents(includePanes: boolean, signal?: AbortSignal) {
-  const agentRun = await runHerdrJson(["agent", "list"], { signal });
-  const paneRun = includePanes ? await runHerdrJson(["pane", "list"], { signal }) : undefined;
-  return { agentRun, paneRun, summary: formatAgentList(agentRun, paneRun) };
-}
-
-async function resolvePaneId(target: string, signal?: AbortSignal) {
-  const run = await runHerdrJson(["agent", "get", target], { signal });
-  const result = resultRecord(run);
-  const agent = isRecord(result.agent) ? result.agent : undefined;
-  const paneId = agent ? getString(agent, "pane_id") : undefined;
-  if (!paneId) throw new Error(`Could not resolve '${target}' to a Herdr pane id.`);
-  return { paneId, run };
-}
-
-function buildStartArgs(params: {
-  name: string;
-  command: string[];
-  cwd?: string;
-  workspaceId?: string;
-  tabId?: string;
-  split?: "right" | "down";
-  env?: string[];
-  focus?: boolean;
-}) {
-  const command = params.command.filter((part) => part.length > 0);
-  if (!params.name.trim()) throw new Error("herdr_start_agent requires a non-empty name.");
-  if (command.length === 0) throw new Error("herdr_start_agent requires a non-empty command array.");
-
-  const args = ["agent", "start", params.name.trim()];
-  if (params.cwd) args.push("--cwd", params.cwd);
-  if (params.workspaceId) args.push("--workspace", params.workspaceId);
-  if (params.tabId) args.push("--tab", params.tabId);
-  if (params.split) args.push("--split", params.split);
-  for (const env of params.env ?? []) {
-    if (env.trim()) args.push("--env", env);
-  }
-  if (params.focus === true) args.push("--focus");
-  if (params.focus === false) args.push("--no-focus");
-  args.push("--", ...command);
-  return args;
-}
-
-function splitCommandArgs(input: string) {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaping = false;
-
-  for (const char of input) {
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaping = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += char;
-  }
-
-  if (escaping) current += "\\";
-  if (quote) throw new Error(`Unclosed ${quote} quote.`);
-  if (current) tokens.push(current);
-  return tokens;
-}
-
-function takeOptionValue(tokens: string[], index: number, token: string, flag: string) {
-  if (token.startsWith(`${flag}=`)) return { value: token.slice(flag.length + 1), next: index + 1 };
-  if (token === flag) {
-    const value = tokens[index + 1];
-    if (!value) throw new Error(`${flag} requires a value.`);
-    return { value, next: index + 2 };
-  }
-  return undefined;
-}
-
-function parseStartCommand(input: string) {
-  const tokens = splitCommandArgs(input);
-  let name = "";
-  let cwd: string | undefined;
-  let workspaceId: string | undefined;
-  let tabId: string | undefined;
-  let split: "right" | "down" | undefined;
-  const env: string[] = [];
-  let focus: boolean | undefined;
-  let command: string[] = [];
-
-  for (let index = 0; index < tokens.length;) {
-    const token = tokens[index];
-    if (token === "--") {
-      command = tokens.slice(index + 1);
-      break;
-    }
-
-    const cwdOption = takeOptionValue(tokens, index, token, "--cwd");
-    if (cwdOption) {
-      cwd = cwdOption.value;
-      index = cwdOption.next;
-      continue;
-    }
-
-    const workspaceOption = takeOptionValue(tokens, index, token, "--workspace");
-    if (workspaceOption) {
-      workspaceId = workspaceOption.value;
-      index = workspaceOption.next;
-      continue;
-    }
-
-    const tabOption = takeOptionValue(tokens, index, token, "--tab");
-    if (tabOption) {
-      tabId = tabOption.value;
-      index = tabOption.next;
-      continue;
-    }
-
-    const splitOption = takeOptionValue(tokens, index, token, "--split");
-    if (splitOption) {
-      if (splitOption.value !== "right" && splitOption.value !== "down") throw new Error("--split must be right or down.");
-      split = splitOption.value;
-      index = splitOption.next;
-      continue;
-    }
-
-    const envOption = takeOptionValue(tokens, index, token, "--env");
-    if (envOption) {
-      env.push(envOption.value);
-      index = envOption.next;
-      continue;
-    }
-
-    if (token === "--focus") {
-      focus = true;
-      index += 1;
-      continue;
-    }
-    if (token === "--no-focus") {
-      focus = false;
-      index += 1;
-      continue;
-    }
-
-    if (!name) {
-      name = token;
-      index += 1;
-      continue;
-    }
-
-    throw new Error(`Unexpected token before --: ${token}`);
-  }
-
-  return { name, command, cwd, workspaceId, tabId, split, env, focus };
-}
-
-function parseReadCommand(input: string) {
-  const tokens = splitCommandArgs(input);
-  const target = tokens.shift();
-  if (!target) throw new Error("Usage: /herdr-read <target> [--lines N] [--source visible|recent|recent-unwrapped] [--ansi]");
-
-  let lines = 80;
-  let source: "visible" | "recent" | "recent-unwrapped" = "recent-unwrapped";
-  let ansi = false;
-
-  for (let index = 0; index < tokens.length;) {
-    const token = tokens[index];
-    const linesOption = takeOptionValue(tokens, index, token, "--lines");
-    if (linesOption) {
-      lines = clampLines(Number(linesOption.value));
-      index = linesOption.next;
-      continue;
-    }
-
-    const sourceOption = takeOptionValue(tokens, index, token, "--source");
-    if (sourceOption) {
-      if (!["visible", "recent", "recent-unwrapped"].includes(sourceOption.value)) {
-        throw new Error("--source must be visible, recent, or recent-unwrapped.");
-      }
-      source = sourceOption.value as "visible" | "recent" | "recent-unwrapped";
-      index = sourceOption.next;
-      continue;
-    }
-
-    if (token === "--ansi") {
-      ansi = true;
-      index += 1;
-      continue;
-    }
-
-    throw new Error(`Unexpected argument: ${token}`);
-  }
-
-  return { target, lines, source, ansi };
-}
-
-function parseTargetAndText(input: string, usage: string) {
-  const tokens = splitCommandArgs(input);
-  const target = tokens.shift();
-  if (!target || tokens.length === 0) throw new Error(usage);
-  return { target, text: tokens.join(" ") };
-}
-
-function parseSingleTarget(input: string, usage: string) {
-  const tokens = splitCommandArgs(input);
-  if (tokens.length !== 1) throw new Error(usage);
-  return tokens[0];
-}
-
-async function showEditor(ctx: { ui: { editor: (title: string, text: string) => Promise<string | undefined>; notify: (message: string, type: "info" | "warning" | "error") => void } }, title: string, text: string) {
-  await ctx.ui.editor(title, text);
+function watchReceiptText(receipt: WatchReceipt): string {
+  return [
+    `Bellwether watch ${receipt.id}: ${receipt.status}`,
+    `Kind: ${receipt.kind}`,
+    `Label: ${receipt.label}`,
+    receipt.failure ? `Failure: ${receipt.failure}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 interface PingWaitRecord {
@@ -488,77 +436,68 @@ interface PingWaitRecord {
   status: PingWaitStatus;
 }
 
-interface PingWaitReceipt {
-  readonly event?: JsonRecord;
-  readonly failure?: string;
-  readonly finishedAt?: string;
-  readonly id: string;
-  readonly label: string;
-  readonly paneIds: readonly string[];
-  readonly startedAt: string;
-  readonly status: PingWaitStatus;
-  readonly wake: "agent" | "notify";
-}
-
-function toPingWaitReceipt(record: PingWaitRecord): PingWaitReceipt {
+function pingReceipt(record: PingWaitRecord) {
   const context = record.actor.getSnapshot().context as PingWaitContext;
   return {
-    event: context.event,
-    failure: context.failure,
-    finishedAt:
-      record.finishedAt === undefined
-        ? undefined
-        : new Date(record.finishedAt).toISOString(),
     id: context.id,
     label: context.label,
     paneIds: context.paneIds,
     startedAt: new Date(context.startedAt).toISOString(),
+    finishedAt:
+      record.finishedAt === undefined
+        ? undefined
+        : new Date(record.finishedAt).toISOString(),
     status: record.status,
     wake: context.wake,
+    event: context.event,
+    failure: context.failure,
   };
 }
 
-function pingWaitReceiptText(receipt: PingWaitReceipt): string {
-  const lines = [
-    `Herdr ping wait ${receipt.id}: ${receipt.status}`,
-    `Label: ${receipt.label}`,
-    `Panes: ${receipt.paneIds.join(", ")}`,
-  ];
-  if (receipt.failure) lines.push(`Failure: ${receipt.failure}`);
-  if (receipt.event) lines.push(`Event: ${JSON.stringify(receipt.event)}`);
-  return lines.join("\n");
+function showEditor(
+  ctx: ExtensionContext,
+  title: string,
+  text: string,
+): Promise<string | undefined> {
+  return ctx.ui.editor(title, text);
 }
 
 export default function bellwetherExtension(pi: ExtensionAPI) {
+  const client = createHerdrClient();
   const pingWaits = new Map<string, PingWaitRecord>();
   let currentContext: ExtensionContext | undefined;
+  let coordination: IntercomCoordination | undefined;
   let shuttingDown = false;
 
-  const finishPingWait = (record: PingWaitRecord, status: Exclude<PingWaitStatus, "running">) => {
+  const watches = createWatchRegistry({
+    client,
+    appendEntry: (type, data) => pi.appendEntry(type, data),
+    notify: (message, level) => currentContext?.ui.notify(message, level),
+    sendMessage: (message, options) => pi.sendMessage(message, options),
+    onLifecycle: (lifecycle, receipt) =>
+      coordination?.publishWatch(lifecycle, receipt),
+  });
+
+  const finishPingWait = (
+    record: PingWaitRecord,
+    status: Exclude<PingWaitStatus, "running">,
+  ) => {
     if (record.status !== "running") return;
     record.status = status;
     record.finishedAt = Date.now();
     if (shuttingDown || status === "cancelled") return;
-
-    const receipt = toPingWaitReceipt(record);
+    const receipt = pingReceipt(record);
     pi.appendEntry("herdr-ping-wait-finished", receipt);
-
-    const summary = pingWaitReceiptText(receipt);
     if (receipt.wake === "notify") {
       currentContext?.ui.notify(
         `${receipt.label}: ${receipt.status}`,
-        receipt.status === "matched" ? "info" : "warning",
+        status === "matched" ? "info" : "warning",
       );
       return;
     }
-
-    const instruction =
-      receipt.status === "matched"
-        ? "A Herdr pane event arrived. Inspect the event and target output before continuing. A turn_ended event means settled, not necessarily finished."
-        : `The Herdr ping wait ${receipt.status}. Inspect the receipt and decide what to do next.`;
     pi.sendMessage(
       {
-        content: `${instruction}\n\n${summary}`,
+        content: `Degraded Herdr ping fallback settled. Inspect the pane and receipt before continuing.\n\n${JSON.stringify(receipt)}`,
         customType: "herdr-ping-wait",
         details: receipt,
         display: true,
@@ -572,24 +511,16 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
   ): Promise<PingWaitRecord> => {
     if (ctx.mode === "print" || ctx.mode === "json") {
-      throw new Error(
-        "herdr_ping_wait requires a long-lived interactive or RPC Pi process",
-      );
+      throw new Error("herdr_ping_wait requires a long-lived Pi process");
     }
-    if (!params.paneIds || params.paneIds.length === 0) {
-      throw new Error("paneIds is required for action=start");
+    if (!params.paneIds?.length) throw new Error("paneIds is required for action=start");
+    const active = [...pingWaits.values()].filter((record) => record.status === "running");
+    if (active.length >= MAX_ACTIVE_PING_WAITS) {
+      throw new Error(`herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`);
     }
-    const activeCount = [...pingWaits.values()].filter(
-      (record) => record.status === "running",
-    ).length;
-    if (activeCount >= MAX_ACTIVE_PING_WAITS) {
-      throw new Error(
-        `herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`,
-      );
-    }
-
-    const id = randomUUID().slice(0, 8);
-    const sessionId = ctx.sessionManager.getSessionId().replaceAll(/[^A-Za-z0-9_-]/g, "-");
+    const sessionId = ctx.sessionManager
+      .getSessionId()
+      .replaceAll(/[^A-Za-z0-9_-]/g, "-");
     const input: PingWaitInput = {
       cursorPath: join(
         homedir(),
@@ -598,7 +529,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         "herdr-pings",
         `pi-bellwether-${sessionId}.cursor.json`,
       ),
-      id,
+      id: randomUUID().slice(0, 8),
       label: params.label?.trim() || params.paneIds.join(", "),
       paneIds: [...new Set(params.paneIds)],
       startedAt: Date.now(),
@@ -608,281 +539,569 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           : params.timeoutSeconds * 1_000,
       wake: params.wake ?? "agent",
     };
-
     const binary = await resolvePingWaitBinary();
     const actor = createPingWaitActor(input);
     const controller = new AbortController();
     const record: PingWaitRecord = {
       actor,
-      completion: Promise.resolve(),
       controller,
+      completion: Promise.resolve(),
       status: "running",
     };
-    pingWaits.set(id, record);
-
+    pingWaits.set(input.id, record);
     actor.subscribe((snapshot) => {
       if (snapshot.status !== "done") return;
       const status = terminalPingWaitStatus(snapshot.value);
       if (status) finishPingWait(record, status);
     });
     actor.start();
-
     record.completion = runPingWait(binary, input, controller.signal).then(
       (outcome) => actor.send(outcome),
       (error) =>
         actor.send({
-          failure: error instanceof Error ? error.message : String(error),
           type: "FAIL",
+          failure: error instanceof Error ? error.message : String(error),
         }),
     );
-
-    pi.appendEntry("herdr-ping-wait-started", {
-      id,
-      label: input.label,
-      paneIds: input.paneIds,
-      startedAt: new Date(input.startedAt).toISOString(),
-      timeoutMs: input.timeoutMs,
-      wake: input.wake,
-    });
+    pi.appendEntry("herdr-ping-wait-started", pingReceipt(record));
     return record;
   };
 
   pi.registerTool({
-    name: "herdr_ping_wait",
-    label: "Wait for Herdr Ping",
+    name: "herdr_layout",
+    label: "Herdr Layout",
     description:
-      "Start, list, inspect, or cancel a non-blocking wait for the next event from one or more Herdr pane spools. Active waits stop when this Pi session shuts down.",
-    promptSnippet:
-      "Start or inspect background Herdr pane-event waits without blocking the current turn.",
-    promptGuidelines: [
-      "Use herdr_ping_wait instead of blocking bash, herdr agent wait, or pane wait-output when Pi should resume after a worker event.",
-      "Treat herdr_ping_wait turn_ended events as settled signals, not proof that the worker finished its task.",
-      "Cancel herdr_ping_wait watches when their worker panes no longer matter.",
-    ],
-    parameters: pingWaitParameters,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      currentContext = ctx;
+      "Create and inspect Herdr terminal topology. Workspaces contain tabs and tabs contain panes. Layout actions are bounded direct socket requests and never start an agent or ordinary command.",
+    promptSnippet: "Inspect or create Herdr workspaces, tabs, and panes",
+    parameters: herdrLayoutParameters,
+    async execute(_id, params, signal) {
+      switch (params.action) {
+        case "current": {
+          const pane = await currentPane(client, signal);
+          return toolText(summarizePane(pane, stringField(pane, "pane_id")), {
+            action: params.action,
+            pane,
+          });
+        }
+        case "workspace_list": {
+          const result = await runRequest(client, { method: "workspace.list" }, signal);
+          const workspaces = recordArray(result, "workspaces");
+          return toolText(
+            workspaces.length ? workspaces.map(summarizeWorkspace).join("\n") : "No workspaces.",
+            { action: params.action, workspaces },
+          );
+        }
+        case "workspace_create": {
+          const current = await currentPane(client, signal);
+          const cwd =
+            params.cwd ??
+            stringField(current, "foreground_cwd") ??
+            stringField(current, "cwd") ??
+            process.cwd();
+          const result = await runRequest(
+            client,
+            {
+              method: "workspace.create",
+              params: {
+                cwd,
+                focus: params.focus === true,
+                ...(params.label ? { label: params.label } : {}),
+                env: {},
+              },
+            },
+            signal,
+          );
+          return toolText(
+            `Created workspace ${stringField(recordField(result, "workspace"), "workspace_id")}, tab ${stringField(recordField(result, "tab"), "tab_id")}, root pane ${stringField(recordField(result, "root_pane"), "pane_id")}`,
+            { action: params.action, result },
+          );
+        }
+        case "workspace_focus": {
+          if (!params.workspace) throw new Error("workspace is required for workspace_focus");
+          const result = await runRequest(
+            client,
+            { method: "workspace.focus", params: { workspace_id: params.workspace } },
+            signal,
+          );
+          return toolText(`Focused workspace ${params.workspace}`, {
+            action: params.action,
+            workspace: recordField(result, "workspace"),
+          });
+        }
+        case "tab_list": {
+          const result = await runRequest(
+            client,
+            {
+              method: "tab.list",
+              params: params.workspace ? { workspace_id: params.workspace } : {},
+            },
+            signal,
+          );
+          const tabs = recordArray(result, "tabs");
+          return toolText(tabs.length ? tabs.map(summarizeTab).join("\n") : "No tabs.", {
+            action: params.action,
+            tabs,
+          });
+        }
+        case "tab_create": {
+          const current = await currentPane(client, signal);
+          const workspaceId = params.workspace ?? stringField(current, "workspace_id");
+          const cwd =
+            params.cwd ??
+            stringField(current, "foreground_cwd") ??
+            stringField(current, "cwd") ??
+            process.cwd();
+          const result = await runRequest(
+            client,
+            {
+              method: "tab.create",
+              params: {
+                ...(workspaceId ? { workspace_id: workspaceId } : {}),
+                cwd,
+                focus: params.focus === true,
+                ...(params.label ? { label: params.label } : {}),
+                env: {},
+              },
+            },
+            signal,
+          );
+          return toolText(
+            `Created tab ${stringField(recordField(result, "tab"), "tab_id")}, root pane ${stringField(recordField(result, "root_pane"), "pane_id")}`,
+            { action: params.action, result },
+          );
+        }
+        case "tab_focus": {
+          if (!params.tab) throw new Error("tab is required for tab_focus");
+          const result = await runRequest(
+            client,
+            { method: "tab.focus", params: { tab_id: params.tab } },
+            signal,
+          );
+          return toolText(`Focused tab ${params.tab}`, {
+            action: params.action,
+            tab: recordField(result, "tab"),
+          });
+        }
+        case "pane_list": {
+          const current = await currentPane(client, signal);
+          const workspaceId = params.workspace ?? stringField(current, "workspace_id");
+          const result = await runRequest(
+            client,
+            {
+              method: "pane.list",
+              params: workspaceId ? { workspace_id: workspaceId } : {},
+            },
+            signal,
+          );
+          const panes = recordArray(result, "panes");
+          return toolText(
+            panes.length
+              ? panes
+                  .map((pane) => summarizePane(pane, stringField(current, "pane_id")))
+                  .join("\n")
+              : "No panes.",
+            { action: params.action, panes, workspaceId },
+          );
+        }
+        case "pane_layout": {
+          const paneId = params.pane ?? stringField(await currentPane(client, signal), "pane_id");
+          if (!paneId) throw new Error("could not resolve current pane");
+          const layout = await paneLayout(client, paneId, signal);
+          return toolText(JSON.stringify(layout, null, 2), {
+            action: params.action,
+            layout,
+          });
+        }
+        case "pane_split": {
+          const current = await currentPane(client, signal);
+          const source = params.pane
+            ? await paneById(client, params.pane, signal)
+            : current;
+          const sourcePaneId = stringField(source, "pane_id");
+          if (!sourcePaneId) throw new Error("source pane omitted pane_id");
+          const direction =
+            params.direction ??
+            chooseSplitDirection(await paneLayout(client, sourcePaneId, signal), sourcePaneId);
+          const cwd =
+            params.cwd ??
+            stringField(source, "foreground_cwd") ??
+            stringField(source, "cwd") ??
+            process.cwd();
+          const result = await runRequest(
+            client,
+            {
+              method: "pane.split",
+              params: {
+                target_pane_id: sourcePaneId,
+                direction,
+                cwd,
+                focus: params.focus === true,
+                env: {},
+              },
+            },
+            signal,
+          );
+          const pane = recordField(result, "pane");
+          return toolText(
+            `Created pane ${stringField(pane, "pane_id")} by splitting ${sourcePaneId} ${direction}`,
+            { action: params.action, pane, sourcePaneId, direction },
+          );
+        }
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_pane",
+    label: "Herdr Pane",
+    description:
+      "Run, inspect, read, send to, or close a raw Herdr pane through bounded direct socket requests. Output waiting belongs only in herdr_watch. Close requires confirm=true and refuses this Pi pane.",
+    promptSnippet: "Control an ordinary Herdr terminal pane",
+    parameters: herdrPaneParameters,
+    async execute(_id, params, signal) {
+      switch (params.action) {
+        case "get": {
+          const pane = await paneById(client, params.pane, signal);
+          return toolText(summarizePane(pane), { action: params.action, pane });
+        }
+        case "run": {
+          if (!params.command) throw new Error("command is required for run");
+          const result = await runRequest(
+            client,
+            {
+              method: "pane.send_input",
+              params: { pane_id: params.pane, text: params.command, keys: ["Enter"] },
+            },
+            signal,
+          );
+          return toolText(`Submitted command to pane ${params.pane}`, {
+            action: params.action,
+            pane: params.pane,
+            command: params.command,
+            result,
+          });
+        }
+        case "read": {
+          const format = params.format ?? "text";
+          const result = await runRequest(
+            client,
+            {
+              method: "pane.read",
+              params: {
+                pane_id: params.pane,
+                source: wireReadSource(params.source ?? "recent-unwrapped"),
+                ...(params.lines === undefined ? {} : { lines: params.lines }),
+                format,
+                strip_ansi: format !== "ansi",
+              },
+            },
+            signal,
+          );
+          const text = formatOutput(readText(result));
+          return toolText(text || `No output from ${params.pane}.`, {
+            action: params.action,
+            pane: params.pane,
+            read: recordField(result, "read"),
+          });
+        }
+        case "send_text": {
+          if (!params.text) throw new Error("text is required for send_text");
+          const result = await runRequest(
+            client,
+            { method: "pane.send_text", params: { pane_id: params.pane, text: params.text } },
+            signal,
+          );
+          return toolText(`Sent literal text to pane ${params.pane}`, {
+            action: params.action,
+            pane: params.pane,
+            result,
+          });
+        }
+        case "send_keys": {
+          if (!params.keys?.length) throw new Error("keys is required for send_keys");
+          const result = await runRequest(
+            client,
+            { method: "pane.send_keys", params: { pane_id: params.pane, keys: params.keys } },
+            signal,
+          );
+          return toolText(`Sent ${params.keys.join(" ")} to pane ${params.pane}`, {
+            action: params.action,
+            pane: params.pane,
+            keys: params.keys,
+            result,
+          });
+        }
+        case "close": {
+          if (params.confirm !== true) {
+            throw new Error("close requires confirm=true because it closes a terminal pane");
+          }
+          const current = await currentPane(client, signal);
+          if (params.pane === stringField(current, "pane_id")) {
+            throw new Error("Refusing to close the pane Pi is running in");
+          }
+          const result = await runRequest(
+            client,
+            { method: "pane.close", params: { pane_id: params.pane } },
+            signal,
+          );
+          return toolText(`Closed pane ${params.pane}`, {
+            action: params.action,
+            pane: params.pane,
+            result,
+          });
+        }
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_agent",
+    label: "Herdr Agent",
+    description:
+      "Control a recognized coding agent in an existing Herdr pane. Prompt submits one bounded agent.prompt request with no wait options and starts no watch. External-state observation belongs only in herdr_watch.",
+    promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
+    parameters: herdrAgentParameters,
+    async execute(_id, params, signal) {
+      switch (params.action) {
+        case "list": {
+          const result = await runRequest(client, { method: "agent.list" }, signal);
+          const agents = recordArray(result, "agents");
+          return toolText(
+            agents.length ? agents.map(summarizeAgent).join("\n") : "No agents.",
+            { action: params.action, agents },
+          );
+        }
+        case "get": {
+          if (!params.target) throw new Error("target is required for get");
+          const result = await runRequest(
+            client,
+            { method: "agent.get", params: { target: params.target } },
+            signal,
+          );
+          const agent = recordField(result, "agent");
+          return toolText(summarizeAgent(agent), { action: params.action, agent });
+        }
+        case "start": {
+          if (!params.name || !params.kind || !params.pane) {
+            throw new Error("name, kind, and pane are required for start");
+          }
+          const result = await runRequest(
+            client,
+            {
+              method: "agent.start",
+              params: {
+                name: params.name,
+                kind: params.kind,
+                pane_id: params.pane,
+                args: params.agentArgs ?? [],
+                ...(params.timeout === undefined ? {} : { timeout_ms: params.timeout }),
+              },
+              timeoutMs: agentStartClientTimeoutMs(params.timeout),
+            },
+            signal,
+          );
+          const agent = recordField(result, "agent");
+          return toolText(`Started ${summarizeAgent(agent)}`, {
+            action: params.action,
+            agent,
+          });
+        }
+        case "prompt": {
+          if (!params.target || !params.prompt) {
+            throw new Error("target and prompt are required for prompt");
+          }
+          const result = await runRequest(
+            client,
+            {
+              method: "agent.prompt",
+              params: { target: params.target, text: params.prompt },
+            },
+            signal,
+          );
+          const agent = recordField(result, "agent");
+          return toolText(`Prompt accepted by ${summarizeAgent(agent)}`, {
+            action: params.action,
+            agent,
+          });
+        }
+        case "read": {
+          if (!params.target) throw new Error("target is required for read");
+          const format: OutputFormat = params.format ?? "text";
+          const result = await runRequest(
+            client,
+            {
+              method: "agent.read",
+              params: {
+                target: params.target,
+                source: wireReadSource(params.source ?? "recent-unwrapped"),
+                ...(params.lines === undefined ? {} : { lines: params.lines }),
+                format,
+                strip_ansi: format !== "ansi",
+              },
+            },
+            signal,
+          );
+          const text = formatOutput(readText(result));
+          return toolText(text || `No output from ${params.target}.`, {
+            action: params.action,
+            target: params.target,
+            read: recordField(result, "read"),
+          });
+        }
+        case "send_keys": {
+          if (!params.target || !params.keys?.length) {
+            throw new Error("target and keys are required for send_keys");
+          }
+          const result = await runRequest(
+            client,
+            {
+              method: "agent.send_keys",
+              params: { target: params.target, keys: params.keys },
+            },
+            signal,
+          );
+          return toolText(`Sent ${params.keys.join(" ")} to ${params.target}`, {
+            action: params.action,
+            result,
+          });
+        }
+        case "focus": {
+          if (!params.target) throw new Error("target is required for focus");
+          const result = await runRequest(
+            client,
+            { method: "agent.focus", params: { target: params.target } },
+            signal,
+          );
+          const agent = recordField(result, "agent");
+          return toolText(`Focused ${summarizeAgent(agent)}`, {
+            action: params.action,
+            agent,
+          });
+        }
+        case "rename": {
+          if (!params.target || (!params.clearName && !params.name)) {
+            throw new Error("target and name or clearName are required for rename");
+          }
+          const result = await runRequest(
+            client,
+            {
+              method: "agent.rename",
+              params: {
+                target: params.target,
+                name: params.clearName ? null : params.name,
+              },
+            },
+            signal,
+          );
+          const agent = recordField(result, "agent");
+          return toolText(
+            params.clearName ? `Cleared agent name for ${params.target}` : `Renamed agent to ${params.name}`,
+            { action: params.action, agent },
+          );
+        }
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "herdr_watch",
+    label: "Herdr Watch",
+    description:
+      "Start, list, inspect, or cancel session-owned Herdr watches. Each watch owns one direct Herdr wait socket and an XState lifecycle. Start returns a running receipt immediately. Kinds are agent_state and pane_output.",
+    promptSnippet: "Start or inspect a non-blocking direct-socket Herdr watch",
+    parameters: herdrWatchParameters,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       if (params.action === "start") {
-        const record = await startPingWait(params, ctx);
-        const receipt = toPingWaitReceipt(record);
+        const receipt = watches.start(
+          toStartWatchParams({
+            kind: params.kind,
+            label: params.label,
+            target: params.target,
+            pane: params.pane,
+            match: params.match,
+            regex: params.regex,
+            until: params.until,
+            timeout: params.timeout,
+            source: params.source,
+            lines: params.lines,
+            raw: params.raw,
+            wake: params.wake,
+          }),
+          ctx,
+        );
         return toolText(
-          `Started Herdr ping wait ${receipt.id} (${receipt.label}) without blocking this turn.`,
+          `Started ${receipt.kind} watch ${receipt.id} (${receipt.label}) without blocking this turn.`,
           receipt,
         );
       }
-
       if (params.action === "list") {
-        const receipts = [...pingWaits.values()].map(toPingWaitReceipt);
-        const text =
-          receipts.length === 0
-            ? "No Herdr ping waits owned by this Pi session."
-            : receipts
+        const receipts = watches.list();
+        return toolText(
+          receipts.length
+            ? receipts
                 .map(
                   (receipt) =>
-                    `${receipt.id}\t${receipt.status}\t${receipt.label}\t${receipt.paneIds.join(",")}`,
+                    `${receipt.id}\t${receipt.status}\t${receipt.kind}\t${receipt.label}`,
                 )
-                .join("\n");
-        return toolText(text, { waits: receipts });
+                .join("\n")
+            : "No Herdr watches owned by this Pi session.",
+          { watches: receipts },
+        );
       }
+      if (!params.id) throw new Error(`id is required for action=${params.action}`);
+      const receipt =
+        params.action === "cancel"
+          ? watches.cancel(params.id)
+          : watches.status(params.id);
+      return toolText(watchReceiptText(receipt), receipt);
+    },
+  });
 
-      if (!params.id) {
-        throw new Error(`id is required for action=${params.action}`);
+  pi.registerTool({
+    name: "herdr_ping_wait",
+    label: "Herdr Ping Wait (Degraded Fallback)",
+    description:
+      "Explicit crash and turn fallback backed by herdr-ping-wait. This degraded path starts a child process only for action=start. herdr_watch never calls it.",
+    promptSnippet: "Use the degraded Herdr ping fallback only when direct watches cannot express the condition",
+    parameters: pingWaitParameters,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      currentContext = ctx;
+      if (params.action === "start") {
+        const record = await startPingWait(params, ctx);
+        const receipt = pingReceipt(record);
+        return toolText(
+          `Started degraded Herdr ping fallback ${receipt.id} without blocking this turn.`,
+          receipt,
+        );
       }
+      if (params.action === "list") {
+        const receipts = [...pingWaits.values()].map(pingReceipt);
+        return toolText(
+          receipts.length
+            ? receipts
+                .map((receipt) => `${receipt.id}\t${receipt.status}\t${receipt.label}`)
+                .join("\n")
+            : "No degraded Herdr ping waits owned by this session.",
+          { waits: receipts },
+        );
+      }
+      if (!params.id) throw new Error(`id is required for action=${params.action}`);
       const record = pingWaits.get(params.id);
       if (!record) throw new Error(`unknown Herdr ping wait: ${params.id}`);
-
       if (params.action === "cancel" && record.status === "running") {
         record.actor.send({ type: "CANCEL" });
         record.controller.abort();
       }
-
-      const receipt = toPingWaitReceipt(record);
-      return toolText(pingWaitReceiptText(receipt), receipt);
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_status",
-    label: "Herdr Status",
-    description: "Show Herdr client/server status and compatibility information.",
-    promptSnippet: "Check Herdr client/server health before managing Herdr agents or panes.",
-    promptGuidelines: [
-      "Use herdr_status when Herdr commands fail or before diagnosing Herdr agent/pane control problems.",
-    ],
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal) {
-      const run = await runHerdr(["status"], { signal });
-      return toolText(run.stdout.trim() || "Herdr status returned no output.", {
-        command: commandForDisplay(run.args),
-        stderr: run.stderr.trim(),
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_list_agents",
-    label: "List Herdr Agents",
-    description: "List Herdr-detected agents and optionally all panes.",
-    promptSnippet: "List Herdr agents/panes before sending, reading, focusing, or stopping a target.",
-    promptGuidelines: [
-      "Use herdr_list_agents before herdr_send_message, herdr_submit, herdr_focus_agent, or herdr_stop_agent when the target is not already known.",
-    ],
-    parameters: Type.Object({
-      includePanes: Type.Optional(Type.Boolean({ description: "Also include raw Herdr panes. Defaults to false." })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const { agentRun, paneRun, summary } = await listAgents(Boolean(params.includePanes), signal);
-      return toolText(summary, {
-        agents: resultRecord(agentRun).agents,
-        panes: paneRun ? resultRecord(paneRun).panes : undefined,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_start_agent",
-    label: "Start Herdr Agent",
-    description: "Start a managed Herdr agent/process in a pane.",
-    promptSnippet: "Start a managed Herdr agent/process with explicit argv and optional cwd/workspace/tab placement.",
-    parameters: Type.Object({
-      name: Type.String({ description: "Herdr agent/process label." }),
-      command: Type.Array(Type.String(), { description: "Command argv. Example: [\"pi\", \"-p\", \"hello\"]" }),
-      cwd: Type.Optional(Type.String({ description: "Working directory for the new process." })),
-      workspaceId: Type.Optional(Type.String({ description: "Existing Herdr workspace id." })),
-      tabId: Type.Optional(Type.String({ description: "Existing Herdr tab id." })),
-      split: Type.Optional(splitDirectionEnum),
-      env: Type.Optional(Type.Array(Type.String(), { description: "Environment entries as KEY=VALUE strings." })),
-      focus: Type.Optional(Type.Boolean({ description: "Whether Herdr should focus the new pane." })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = buildStartArgs({
-        name: params.name,
-        command: params.command,
-        cwd: params.cwd,
-        workspaceId: params.workspaceId,
-        tabId: params.tabId,
-        split: params.split,
-        env: params.env,
-        focus: params.focus,
-      });
-      const run = await runHerdrJson(args, { signal });
-      return toolText(`Started Herdr agent '${params.name}'.\n\n${prettyResult(run)}`, {
-        command: commandForDisplay(run.args),
-        result: run.result,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_send_message",
-    label: "Send Herdr Message",
-    description: "Send literal text to a Herdr agent target without pressing Enter.",
-    promptSnippet: "Send literal text to a Herdr target; call herdr_submit separately to press Enter.",
-    parameters: Type.Object({
-      target: Type.String({ description: "Herdr target: terminal id, unique agent name, detected label, pane id, or legacy pane id." }),
-      message: Type.String({ description: "Literal text to send. Does not press Enter." }),
-    }),
-    async execute(_toolCallId, params, signal) {
-      if (!params.message) throw new Error("herdr_send_message requires non-empty message text.");
-      const run = await runHerdrJson(["agent", "send", params.target, params.message], { signal });
-      return toolText(`Sent ${params.message.length} chars to ${params.target}.`, {
-        command: commandForDisplay(run.args),
-        result: run.result,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_submit",
-    label: "Submit Herdr Agent",
-    description: "Press Enter in a Herdr agent target's pane.",
-    promptSnippet: "Press Enter in a Herdr target after herdr_send_message writes text.",
-    parameters: Type.Object({
-      target: Type.String({ description: "Herdr target to resolve to a pane before pressing Enter." }),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const { paneId, run: targetRun } = await resolvePaneId(params.target, signal);
-      const run = await runHerdrJson(["pane", "send-keys", paneId, "Enter"], { signal });
-      return toolText(`Pressed Enter in ${params.target} (${paneId}).`, {
-        target: targetRun.result,
-        command: commandForDisplay(run.args),
-        result: run.result,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_read_agent",
-    label: "Read Herdr Agent",
-    description: "Read recent output from a Herdr agent target.",
-    promptSnippet: "Read recent Herdr target output before deciding whether to send or submit more text.",
-    parameters: Type.Object({
-      target: Type.String({ description: "Herdr target to read." }),
-      source: Type.Optional(readSourceEnum),
-      lines: Type.Optional(Type.Number({ minimum: 1, maximum: 500, description: "Line count. Defaults to 80, capped at 500." })),
-      ansi: Type.Optional(Type.Boolean({ description: "Return ANSI formatted output instead of plain text." })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const source = params.source || "recent-unwrapped";
-      const lines = clampLines(params.lines);
-      const format = params.ansi ? "ansi" : "text";
-      const run = await runHerdrJson(["agent", "read", params.target, "--source", source, "--lines", String(lines), "--format", format], { signal });
-      const result = resultRecord(run);
-      const read = isRecord(result.read) ? result.read : {};
-      const text = getString(read, "text") || "";
-      return toolText(text || `No output from ${params.target}.`, {
-        command: commandForDisplay(run.args),
-        read,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_focus_agent",
-    label: "Focus Herdr Agent",
-    description: "Focus a Herdr agent target.",
-    parameters: Type.Object({
-      target: Type.String({ description: "Herdr target to focus." }),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const run = await runHerdrJson(["agent", "focus", params.target], { signal });
-      return toolText(`Focused Herdr target ${params.target}.`, {
-        command: commandForDisplay(run.args),
-        result: run.result,
-      });
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr_stop_agent",
-    label: "Stop Herdr Agent",
-    description: "Close the pane for a Herdr agent target. Requires confirm=true because this is destructive.",
-    promptSnippet: "Close a Herdr target's pane only after reading/listing and only with confirm=true.",
-    promptGuidelines: [
-      "Use herdr_stop_agent only when the user explicitly asks to close/stop a Herdr pane, and set confirm=true only after checking the target.",
-    ],
-    parameters: Type.Object({
-      target: Type.String({ description: "Herdr target to resolve to a pane and close." }),
-      confirm: Type.Boolean({ description: "Must be true. This closes a terminal pane." }),
-    }),
-    async execute(_toolCallId, params, signal) {
-      if (params.confirm !== true) throw new Error("herdr_stop_agent requires confirm=true because it closes a terminal pane.");
-      const { paneId, run: targetRun } = await resolvePaneId(params.target, signal);
-      const run = await runHerdrJson(["pane", "close", paneId], { signal });
-      return toolText(`Closed Herdr target ${params.target} (${paneId}).`, {
-        target: targetRun.result,
-        command: commandForDisplay(run.args),
-        result: run.result,
-      });
+      return toolText(JSON.stringify(pingReceipt(record), null, 2), pingReceipt(record));
     },
   });
 
   pi.registerCommand("herdr-status", {
-    description: "Show Herdr client/server status",
+    description: "Show Herdr socket status",
     handler: async (_args, ctx) => {
       try {
-        const run = await runHerdr(["status"]);
-        await showEditor(ctx, "Herdr status", run.stdout.trim() || "Herdr status returned no output.");
+        const result = await runRequest(client, { method: "ping" });
+        await showEditor(ctx, "Herdr status", JSON.stringify(result, null, 2));
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -890,53 +1109,33 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("herdr-agents", {
-    description: "List Herdr agents/panes",
+    description: "List Herdr agents; pass --panes to include the current workspace panes",
     handler: async (args, ctx) => {
       try {
-        const includePanes = splitCommandArgs(args).includes("--panes");
-        const { summary } = await listAgents(includePanes);
-        await showEditor(ctx, "Herdr agents", summary);
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
-  });
-
-  pi.registerCommand("herdr-start", {
-    description: "Start a managed Herdr process: /herdr-start <name> -- <cmd ...>",
-    handler: async (args, ctx) => {
-      try {
-        const parsed = parseStartCommand(args);
-        const run = await runHerdrJson(buildStartArgs(parsed));
-        ctx.ui.notify(`Started Herdr agent '${parsed.name}'.`, "info");
-        await showEditor(ctx, "Herdr start result", prettyResult(run));
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
-  });
-
-  pi.registerCommand("herdr-send", {
-    description: "Send literal text to a Herdr target without Enter",
-    handler: async (args, ctx) => {
-      try {
-        const { target, text } = parseTargetAndText(args, "Usage: /herdr-send <target> <message>");
-        await runHerdrJson(["agent", "send", target, text]);
-        ctx.ui.notify(`Sent ${text.length} chars to ${target}.`, "info");
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
-  });
-
-  pi.registerCommand("herdr-submit", {
-    description: "Press Enter in a Herdr target pane",
-    handler: async (args, ctx) => {
-      try {
-        const target = parseSingleTarget(args, "Usage: /herdr-submit <target>");
-        const { paneId } = await resolvePaneId(target);
-        await runHerdrJson(["pane", "send-keys", paneId, "Enter"]);
-        ctx.ui.notify(`Pressed Enter in ${target} (${paneId}).`, "info");
+        const result = await runRequest(client, { method: "agent.list" });
+        const agents = recordArray(result, "agents");
+        const sections = [
+          agents.length ? agents.map(summarizeAgent).join("\n") : "No agents.",
+        ];
+        if (args.trim() === "--panes") {
+          const current = await currentPane(client);
+          const workspaceId = stringField(current, "workspace_id");
+          const panesResult = await runRequest(client, {
+            method: "pane.list",
+            params: workspaceId ? { workspace_id: workspaceId } : {},
+          });
+          const panes = recordArray(panesResult, "panes");
+          sections.push(
+            panes.length
+              ? panes
+                  .map((pane) => summarizePane(pane, stringField(current, "pane_id")))
+                  .join("\n")
+              : "No panes.",
+          );
+        } else if (args.trim()) {
+          throw new Error("Usage: /herdr-agents [--panes]");
+        }
+        await showEditor(ctx, "Herdr agents", sections.join("\n\n"));
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -944,15 +1143,25 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("herdr-read", {
-    description: "Read recent output from a Herdr target",
+    description: "Read recent output: /herdr-read <agent target>",
     handler: async (args, ctx) => {
+      const target = args.trim();
+      if (!target) {
+        ctx.ui.notify("Usage: /herdr-read <agent target>", "error");
+        return;
+      }
       try {
-        const parsed = parseReadCommand(args);
-        const format = parsed.ansi ? "ansi" : "text";
-        const run = await runHerdrJson(["agent", "read", parsed.target, "--source", parsed.source, "--lines", String(parsed.lines), "--format", format]);
-        const result = resultRecord(run);
-        const read = isRecord(result.read) ? result.read : {};
-        await showEditor(ctx, `Herdr read: ${parsed.target}`, getString(read, "text") || "");
+        const result = await runRequest(client, {
+          method: "agent.read",
+          params: {
+            target,
+            source: "recent_unwrapped",
+            lines: 80,
+            format: "text",
+            strip_ansi: true,
+          },
+        });
+        await showEditor(ctx, `Herdr read: ${target}`, formatOutput(readText(result)));
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -962,9 +1171,13 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   pi.registerCommand("herdr-focus", {
     description: "Focus a Herdr agent target",
     handler: async (args, ctx) => {
+      const target = args.trim();
+      if (!target) {
+        ctx.ui.notify("Usage: /herdr-focus <agent target>", "error");
+        return;
+      }
       try {
-        const target = parseSingleTarget(args, "Usage: /herdr-focus <target>");
-        await runHerdrJson(["agent", "focus", target]);
+        await runRequest(client, { method: "agent.focus", params: { target } });
         ctx.ui.notify(`Focused ${target}.`, "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -972,41 +1185,107 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    currentContext = ctx;
-  });
-
-  pi.on("session_shutdown", async () => {
-    shuttingDown = true;
-    const active = [...pingWaits.values()].filter(
-      (record) => record.status === "running",
-    );
-    for (const record of active) {
-      record.actor.send({ type: "CANCEL" });
-      record.controller.abort();
-    }
-    await Promise.allSettled(active.map((record) => record.completion));
-    for (const record of active) record.actor.stop();
-    pingWaits.clear();
-    currentContext = undefined;
-  });
-
   pi.registerCommand("herdr-stop", {
-    description: "Close a Herdr target pane after confirmation",
+    description: "Close a Herdr agent pane after confirmation",
     handler: async (args, ctx) => {
+      const target = args.trim();
+      if (!target) {
+        ctx.ui.notify("Usage: /herdr-stop <agent target>", "error");
+        return;
+      }
       try {
-        const target = parseSingleTarget(args, "Usage: /herdr-stop <target>");
-        const { paneId } = await resolvePaneId(target);
-        const ok = await ctx.ui.confirm("Close Herdr pane?", `Target: ${target}\nPane: ${paneId}\n\nThis closes the terminal pane.`);
-        if (!ok) {
-          ctx.ui.notify("Herdr stop cancelled.", "info");
-          return;
+        const agent = recordField(
+          await runRequest(client, { method: "agent.get", params: { target } }),
+          "agent",
+        );
+        const paneId = stringField(agent, "pane_id");
+        if (!paneId) throw new Error("agent result omitted pane_id");
+        const current = await currentPane(client);
+        if (paneId === stringField(current, "pane_id")) {
+          throw new Error("Refusing to close the pane Pi is running in");
         }
-        await runHerdrJson(["pane", "close", paneId]);
+        const confirmed = await ctx.ui.confirm(
+          "Close Herdr pane?",
+          `Target: ${target}\nPane: ${paneId}\n\nThis closes the terminal pane.`,
+        );
+        if (!confirmed) return;
+        await runRequest(client, { method: "pane.close", params: { pane_id: paneId } });
         ctx.ui.notify(`Closed ${target} (${paneId}).`, "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
+  });
+
+  pi.on("session_start", (event, ctx) => {
+    currentContext = ctx;
+    shuttingDown = false;
+    if (event.reason !== "startup") watches.bumpGeneration();
+    if (!coordination) {
+      coordination = createIntercomCoordination({
+        events: pi.events,
+        sessionId: ctx.sessionManager.getSessionId(),
+        paneId: process.env.HERDR_PANE_ID,
+        activeWatches: () => watches.active(),
+        wake: (signal) => {
+          const details = {
+            eventId: signal.eventId,
+            sourceSessionId: signal.sourceSessionId,
+            watchId: signal.watchId,
+          };
+          pi.appendEntry("bellwether-intercom-wake-hint", details);
+          pi.sendMessage(
+            {
+              customType: "bellwether-intercom-wake",
+              content: "bellwether_intercom_wake",
+              display: false,
+              details,
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        },
+        onSignal: (signal) => {
+          pi.appendEntry("bellwether-intercom-signal", {
+            eventId: signal.eventId,
+            kind: signal.kind,
+            sourceSessionId: signal.sourceSessionId,
+            ...(signal.kind === "workflow_receipt"
+              ? {
+                  workflowId: signal.workflowId,
+                  itemId: signal.itemId,
+                  generation: signal.generation,
+                  sequence: signal.sequence,
+                }
+              : {}),
+          });
+        },
+      });
+    } else {
+      coordination.announce();
+    }
+    pi.appendEntry("bellwether-capability", {
+      protocol: BELLWETHER_PROTOCOL,
+      directSocket: true,
+      tools: ["herdr_layout", "herdr_pane", "herdr_agent", "herdr_watch"],
+    });
+  });
+
+  pi.on("session_shutdown", async () => {
+    shuttingDown = true;
+    coordination?.dispose();
+    coordination = undefined;
+    await watches.shutdown();
+
+    const activePingWaits = [...pingWaits.values()].filter(
+      (record) => record.status === "running",
+    );
+    for (const record of activePingWaits) {
+      record.actor.send({ type: "CANCEL" });
+      record.controller.abort();
+    }
+    await Promise.allSettled(activePingWaits.map((record) => record.completion));
+    for (const record of activePingWaits) record.actor.stop();
+    pingWaits.clear();
+    currentContext = undefined;
   });
 }

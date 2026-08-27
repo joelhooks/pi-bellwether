@@ -1,9 +1,18 @@
 {
   "name": "@joelhooks/pi-bellwether",
-  "version": "0.1.0",
-  "description": "Bellwether 🐏🔔 — a Pi package for managing Herdr agents, panes, and runtime sessions from slash commands and LLM tools.",
+  "version": "1.0.0",
+  "description": "Bellwether 🐏🔔 — Effect-powered direct Herdr socket control and XState watch lifecycles for Pi.",
   "type": "module",
-  "keywords": ["pi-package", "pi", "herdr", "bellwether", "terminal", "agents"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "herdr",
+    "bellwether",
+    "terminal",
+    "agents",
+    "effect",
+    "xstate"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,13 +23,28 @@
     "url": "https://github.com/joelhooks/pi-bellwether/issues"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
+  "files": [
+    "extensions/pi-bellwether.ts",
+    "src/herdr-client.ts",
+    "src/intercom.ts",
+    "src/ping-wait.ts",
+    "src/watch.ts",
+    "skills/pi-bellwether/SKILL.md",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "check": "tsc --project tsconfig.json",
     "smoke": "bash -lc 'PI_OFFLINE=1 pi -e . --help >/tmp/pi-bellwether-help.out 2>/tmp/pi-bellwether-help.err; status=$?; rg -n \"pi-bellwether|herdr_|cannot load|Error loading\" /tmp/pi-bellwether-help.out /tmp/pi-bellwether-help.err || true; exit $status'",
-    "test": "bun test src extensions"
+    "test": "bun test src extensions",
+    "pack:check": "node scripts/check-package.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -36,6 +60,7 @@
     "typescript": "latest"
   },
   "dependencies": {
+    "effect": "4.0.0-beta.99",
     "xstate": "5.32.5"
   }
 }
