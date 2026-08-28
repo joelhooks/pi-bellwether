@@ -1,0 +1,32 @@
+---
+title: "Explicit watch timeout units"
+type: "project"
+status: "active"
+created_at: "2026-08-28"
+privacy: "private"
+tags:
+  - bellwether
+  - herdr
+  - api-design
+---
+
+# Explicit watch timeout units
+
+## Symptom
+
+Agents repeatedly passed `timeout: 7200` intending two hours. Bellwether interpreted the value as milliseconds, so the watch expired after 7.2 seconds. The public schema named no unit.
+
+## Decision
+
+Bellwether tools expose `timeoutSeconds` only. For watches, `7200` means two hours. For agent startup, `120` means two minutes. The extension multiplies by 1,000 once when it creates the internal request. Internal Effect transport and Herdr protocol fields remain milliseconds.
+
+The ambiguous public `timeout` field is removed from `herdr_watch` and `herdr_agent` rather than kept as an alias. `herdr_ping_wait` already used `timeoutSeconds`. A validation failure is safer than silently choosing the wrong unit.
+
+## Regression boundary
+
+The extension test verifies all three facts:
+
+1. Watch and agent schemas contain `timeoutSeconds`.
+2. Watch and agent schemas do not contain `timeout`.
+3. `timeoutSeconds: 7200` sends `timeout_ms: 7200000` for watches.
+4. `timeoutSeconds: 8` sends `timeout_ms: 8000` for agent startup.

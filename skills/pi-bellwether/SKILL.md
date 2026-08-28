@@ -24,11 +24,13 @@ Bellwether owns generic Herdr control. `herdr-workflow` owns durable workflow tr
 - `herdr_agent`: list, get, start, prompt, read, send keys, focus, rename.
 - `herdr_watch`: start, list, status, cancel for `agent_state` and `pane_output`.
 
+Public deadlines use `timeoutSeconds`. Bellwether converts them to protocol milliseconds at the boundary. Never pass `timeout`.
+
 The action tools contain no wait path. `herdr_agent prompt` starts no watch.
 
 ## Watch receipts
 
-`herdr_watch start` returns a running receipt immediately. Its XState lifecycle is:
+`herdr_watch start` returns a running receipt immediately. Use `timeoutSeconds` for a deadline; `7200` means two hours. Never pass an ambiguous `timeout` field. Its XState lifecycle is:
 
 ```text
 starting -> running -> matched | timedOut | targetGone | failed | cancelled
