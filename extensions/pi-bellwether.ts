@@ -54,6 +54,7 @@ import {
 
 const MAX_ACTIVE_PING_WAITS = 32;
 const BELLWETHER_PROTOCOL = 1;
+const MAX_WATCH_TIMEOUT_SECONDS = Math.floor(MAX_WATCH_TIMEOUT_MS / 1_000);
 
 export function agentStartClientTimeoutMs(
   serverTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
@@ -160,7 +161,13 @@ export const herdrAgentParameters = Type.Object(
     kind: Type.Optional(AgentKindEnum),
     agentArgs: Type.Optional(Type.Array(Type.String())),
     prompt: Type.Optional(Type.String({ maxLength: 900_000 })),
-    timeout: Type.Optional(Type.Integer({ minimum: 3_001, maximum: 300_000 })),
+    timeoutSeconds: Type.Optional(
+      Type.Integer({
+        minimum: 4,
+        maximum: 300,
+        description: "Agent startup timeout in seconds. Example: 120 means two minutes.",
+      }),
+    ),
     source: Type.Optional(ReadSourceEnum),
     lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
     format: Type.Optional(OutputFormatEnum),
@@ -181,8 +188,12 @@ export const herdrWatchParameters = Type.Object(
     match: Type.Optional(Type.String()),
     regex: Type.Optional(Type.Boolean()),
     until: Type.Optional(Type.Array(AgentStatusEnum, { minItems: 1 })),
-    timeout: Type.Optional(
-      Type.Integer({ minimum: 1, maximum: MAX_WATCH_TIMEOUT_MS }),
+    timeoutSeconds: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        maximum: MAX_WATCH_TIMEOUT_SECONDS,
+        description: "Overall timeout in seconds. Example: 7200 means two hours.",
+      }),
     ),
     source: Type.Optional(WatchReadSourceEnum),
     lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000 })),
@@ -381,7 +392,7 @@ function toStartWatchParams(params: {
   match?: string;
   regex?: boolean;
   until?: AgentStatus[];
-  timeout?: number;
+  timeoutSeconds?: number;
   source?: ReadSource;
   lines?: number;
   raw?: boolean;
@@ -394,7 +405,10 @@ function toStartWatchParams(params: {
       target: params.target,
       label: params.label,
       until: params.until,
-      timeoutMs: params.timeout,
+      timeoutMs:
+        params.timeoutSeconds === undefined
+          ? undefined
+          : params.timeoutSeconds * 1_000,
       wake: params.wake,
     };
   }
@@ -411,7 +425,10 @@ function toStartWatchParams(params: {
       source: params.source,
       lines: params.lines,
       raw: params.raw,
-      timeoutMs: params.timeout,
+      timeoutMs:
+        params.timeoutSeconds === undefined
+          ? undefined
+          : params.timeoutSeconds * 1_000,
       wake: params.wake,
     };
   }
@@ -926,7 +943,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_agent",
     label: "Herdr Agent",
     description:
-      "Control a recognized coding agent in an existing Herdr pane. Prompt submits one bounded agent.prompt request with no wait options and starts no watch. External-state observation belongs only in herdr_watch.",
+      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds. Prompt submits one bounded agent.prompt request with no wait options and starts no watch. External-state observation belongs only in herdr_watch.",
     promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
     parameters: herdrAgentParameters,
     async execute(_id, params, signal) {
@@ -953,6 +970,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           if (!params.name || !params.kind || !params.pane) {
             throw new Error("name, kind, and pane are required for start");
           }
+          const serverTimeoutMs =
+            params.timeoutSeconds === undefined
+              ? undefined
+              : params.timeoutSeconds * 1_000;
           const result = await runRequest(
             client,
             {
@@ -962,9 +983,9 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
                 kind: params.kind,
                 pane_id: params.pane,
                 args: params.agentArgs ?? [],
-                ...(params.timeout === undefined ? {} : { timeout_ms: params.timeout }),
+                ...(serverTimeoutMs === undefined ? {} : { timeout_ms: serverTimeoutMs }),
               },
-              timeoutMs: agentStartClientTimeoutMs(params.timeout),
+              timeoutMs: agentStartClientTimeoutMs(serverTimeoutMs),
             },
             signal,
           );
@@ -1075,7 +1096,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_watch",
     label: "Herdr Watch",
     description:
-      "Start, list, inspect, or cancel session-owned Herdr watches. Each watch owns one direct Herdr wait socket and an XState lifecycle. Start returns a running receipt immediately. Kinds are agent_state and pane_output.",
+      "Start, list, inspect, or cancel session-owned Herdr watches. Each watch owns one direct Herdr wait socket and an XState lifecycle. Start returns a running receipt immediately. timeoutSeconds uses seconds. Kinds are agent_state and pane_output.",
     promptSnippet: "Start or inspect a non-blocking direct-socket Herdr watch",
     parameters: herdrWatchParameters,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -1089,7 +1110,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
             match: params.match,
             regex: params.regex,
             until: params.until,
-            timeout: params.timeout,
+            timeoutSeconds: params.timeoutSeconds,
             source: params.source,
             lines: params.lines,
             raw: params.raw,

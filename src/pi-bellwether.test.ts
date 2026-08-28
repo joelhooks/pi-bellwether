@@ -258,6 +258,57 @@ describe("Bellwether public surface", () => {
     expect(schemas).not.toContain("wait_output");
     expect(schemas).not.toContain("prompt_settle");
     expect(schemas).not.toContain("workflow_receipt");
+
+    const agentProperties = (agentSchema as {
+      properties?: Record<string, { description?: string }>;
+    }).properties;
+    const watchProperties = (watchSchema as {
+      properties?: Record<string, { description?: string }>;
+    }).properties;
+    expect(agentProperties).toHaveProperty("timeoutSeconds");
+    expect(agentProperties).not.toHaveProperty("timeout");
+    expect(agentProperties?.timeoutSeconds?.description).toContain(
+      "120 means two minutes",
+    );
+    expect(watchProperties).toHaveProperty("timeoutSeconds");
+    expect(watchProperties).not.toHaveProperty("timeout");
+    expect(watchProperties?.timeoutSeconds?.description).toContain(
+      "7200 means two hours",
+    );
+  });
+
+  test("converts explicit watch timeout seconds to Herdr milliseconds", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers } = harness();
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+
+    await watch.execute(
+      "call-1",
+      {
+        action: "start",
+        kind: "pane_output",
+        pane: "w1:p1",
+        match: "DONE",
+        timeoutSeconds: 7_200,
+        wake: "silent",
+      },
+      undefined,
+      undefined,
+      context(),
+    );
+    const deadline = Date.now() + 1_000;
+    while (server.requests.length === 0 && Date.now() < deadline) await sleep(1);
+
+    expect(server.requests[0]).toMatchObject({
+      method: "pane.wait_for_output",
+      params: { timeout_ms: 7_200_000 },
+    });
+    await handlers.get("session_shutdown")?.();
   });
 
   test("prompt sends one bounded request with no wait options and starts no watch", async () => {
@@ -602,7 +653,7 @@ describe("Herdr 0.7.5 action parity", () => {
           name: "worker",
           kind: "pi",
           agentArgs: ["--no-session"],
-          timeout: 8_000,
+          timeoutSeconds: 8,
         },
         expected: [
           {

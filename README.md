@@ -38,6 +38,8 @@ There is no `wait_output` action. `close` requires `confirm: true` and refuses t
 
 Actions: `list`, `get`, `start`, `prompt`, `read`, `send_keys`, `focus`, `rename`.
 
+Agent startup uses `timeoutSeconds`; `120` means two minutes. There is no ambiguous public `timeout` field.
+
 There is no `wait` action or `wait` parameter. `prompt` sends one bounded `agent.prompt` request with no wait options. It starts no implicit watch.
 
 ### `herdr_watch`
@@ -49,7 +51,7 @@ Initial kinds:
 - `agent_state`
 - `pane_output`
 
-`start` returns a cloneable running receipt immediately. Wake policies are `agent`, `notify`, and `silent`. Agent-state watches race the event-driven wait against a five-second liveness probe. Explicit `agent_not_found`, `agent_not_running`, or identity replacement settles as `targetGone`; transient probe failures do not override the wait. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
+`start` returns a cloneable running receipt immediately. The public timeout field is `timeoutSeconds`; `7200` means two hours. Bellwether converts seconds to Herdr milliseconds once at the extension boundary. Bellwether exposes no ambiguous public `timeout` field. Wake policies are `agent`, `notify`, and `silent`. Agent-state watches race the event-driven wait against a five-second liveness probe. Explicit `agent_not_found`, `agent_not_running`, or identity replacement settles as `targetGone`; transient probe failures do not override the wait. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
 
 The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. `src/watch.ts` keeps a typed future adapter seam without duplicating workflow leases or state.
 
