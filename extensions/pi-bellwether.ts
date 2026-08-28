@@ -12,6 +12,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Effect } from "effect";
 import { Type } from "typebox";
 import type { Static } from "typebox";
@@ -428,6 +429,66 @@ function watchReceiptText(receipt: WatchReceipt): string {
     .join("\n");
 }
 
+const WATCH_WIDGET_ID = "bellwether-watch-liveness";
+const WATCH_WIDGET_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const WATCH_WIDGET_INTERVAL_MS = 500;
+const WATCH_WIDGET_MAX_ROWS = 3;
+
+function watchAge(startedAt: string, now: number): string {
+  const elapsed = Math.max(0, now - Date.parse(startedAt));
+  const seconds = Math.floor(elapsed / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
+export function renderWatchLivenessWidget(
+  receipts: readonly WatchReceipt[],
+  now: number,
+  frameIndex: number,
+  width: number,
+  theme: {
+    bold: (text: string) => string;
+    fg: (color: "accent" | "dim" | "muted", text: string) => string;
+  },
+): string[] {
+  const active = receipts.filter((receipt) => receipt.status === "running");
+  if (active.length === 0 || width < 24) return [];
+
+  const oldest = active.reduce((candidate, receipt) =>
+    Date.parse(receipt.startedAt) < Date.parse(candidate.startedAt) ? receipt : candidate,
+  );
+  const frame = WATCH_WIDGET_FRAMES[frameIndex % WATCH_WIDGET_FRAMES.length];
+  const noun = active.length === 1 ? "watch" : "watches";
+  const lines = [
+    theme.fg(
+      "accent",
+      theme.bold(
+        `${frame} Bellwether waiting · ${active.length} ${noun} · oldest ${watchAge(oldest.startedAt, now)}`,
+      ),
+    ),
+  ];
+
+  for (const receipt of active.slice(0, WATCH_WIDGET_MAX_ROWS)) {
+    const phase = receipt.phase === "starting" ? "connecting" : "watching";
+    const target = receipt.target ?? receipt.pane;
+    const detail = [target, watchAge(receipt.startedAt, now)].filter(Boolean).join(" · ");
+    lines.push(
+      theme.fg("muted", `  ${phase} ${receipt.label}`) +
+        (detail ? theme.fg("dim", ` · ${detail}`) : ""),
+    );
+  }
+  if (active.length > WATCH_WIDGET_MAX_ROWS) {
+    lines.push(
+      theme.fg("dim", `  +${active.length - WATCH_WIDGET_MAX_ROWS} more active`),
+    );
+  }
+
+  return lines.map((line) => truncateToWidth(line, width));
+}
+
 interface PingWaitRecord {
   readonly actor: ReturnType<typeof createPingWaitActor>;
   readonly controller: AbortController;
@@ -467,15 +528,22 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   const pingWaits = new Map<string, PingWaitRecord>();
   let currentContext: ExtensionContext | undefined;
   let coordination: IntercomCoordination | undefined;
+  let watchWidgetFrame = 0;
+  let watchWidgetTimer: ReturnType<typeof setInterval> | undefined;
+  let watchWidgetTui: { requestRender: () => void } | undefined;
   let shuttingDown = false;
+
+  const requestWatchWidgetRender = () => watchWidgetTui?.requestRender();
 
   const watches = createWatchRegistry({
     client,
     appendEntry: (type, data) => pi.appendEntry(type, data),
     notify: (message, level) => currentContext?.ui.notify(message, level),
     sendMessage: (message, options) => pi.sendMessage(message, options),
-    onLifecycle: (lifecycle, receipt) =>
-      coordination?.publishWatch(lifecycle, receipt),
+    onLifecycle: (lifecycle, receipt) => {
+      coordination?.publishWatch(lifecycle, receipt);
+      requestWatchWidgetRender();
+    },
   });
 
   const finishPingWait = (
@@ -1221,6 +1289,30 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     currentContext = ctx;
     shuttingDown = false;
     if (event.reason !== "startup") watches.bumpGeneration();
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget(WATCH_WIDGET_ID, (tui, theme) => {
+        watchWidgetTui = tui;
+        return {
+          render: (width: number) =>
+            renderWatchLivenessWidget(
+              watches.active(),
+              Date.now(),
+              watchWidgetFrame,
+              width,
+              theme,
+            ),
+          invalidate: () => {},
+          dispose: () => {
+            if (watchWidgetTui === tui) watchWidgetTui = undefined;
+          },
+        };
+      });
+      watchWidgetTimer ??= setInterval(() => {
+        if (watches.active().length === 0) return;
+        watchWidgetFrame = (watchWidgetFrame + 1) % WATCH_WIDGET_FRAMES.length;
+        requestWatchWidgetRender();
+      }, WATCH_WIDGET_INTERVAL_MS);
+    }
     if (!coordination) {
       coordination = createIntercomCoordination({
         events: pi.events,
@@ -1272,6 +1364,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     shuttingDown = true;
+    if (watchWidgetTimer) clearInterval(watchWidgetTimer);
+    watchWidgetTimer = undefined;
+    currentContext?.ui.setWidget(WATCH_WIDGET_ID, undefined);
+    watchWidgetTui = undefined;
     coordination?.dispose();
     coordination = undefined;
     await watches.shutdown();
