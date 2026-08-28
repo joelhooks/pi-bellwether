@@ -18,6 +18,8 @@ export const MAX_ACTIVE_WATCHES = 32;
 export const MAX_TERMINAL_WATCHES = 64;
 /** Leaves room for the transport grace below Node's 2^31-1ms timer ceiling. */
 export const MAX_WATCH_TIMEOUT_MS = 2_000_000_000;
+/** Re-probe agent identity because a crashed TUI can return to a live shell without a wait event. */
+export const DEFAULT_AGENT_PROBE_INTERVAL_MS = 5_000;
 
 export type WatchKind = "agent_state" | "pane_output";
 export type WatchWake = "agent" | "notify" | "silent";
@@ -78,7 +80,7 @@ export interface WatchInput {
 export type WatchOutcome =
   | { readonly kind: "matched"; readonly result: HerdrResult }
   | { readonly kind: "timedOut"; readonly failure: string }
-  | { readonly kind: "targetGone"; readonly failure: string }
+  | { readonly kind: "targetGone"; readonly failure: string; readonly code?: string }
   | { readonly kind: "failed"; readonly failure: string; readonly code?: string };
 
 type WatchContext = WatchInput & {
@@ -198,7 +200,7 @@ export function classifyWatchError(error: HerdrError): WatchOutcome {
       return { kind: "timedOut", failure: error.message };
     }
     if (error.code === "agent_not_running" || error.code === "agent_not_found") {
-      return { kind: "targetGone", failure: error.message };
+      return { kind: "targetGone", code: error.code, failure: error.message };
     }
     return { kind: "failed", code: error.code, failure: error.message };
   }
@@ -206,6 +208,81 @@ export function classifyWatchError(error: HerdrError): WatchOutcome {
     return { kind: "timedOut", failure: error.message };
   }
   return { kind: "failed", failure: error.message };
+}
+
+function watchedAgentStatuses(input: WatchInput): readonly AgentStatus[] {
+  return input.until && input.until.length > 0
+    ? input.until
+    : ["idle", "done", "blocked"];
+}
+
+interface ProbedAgentIdentity {
+  readonly terminalId: string;
+  readonly expectedName?: string;
+  readonly expectedAgent?: string;
+}
+
+function probedAgentIdentityMatches(
+  current: Extract<HerdrResult, { readonly type: "agent_info" }>["agent"],
+  expected: ProbedAgentIdentity,
+): boolean {
+  return (
+    current.terminal_id === expected.terminalId &&
+    (expected.expectedName === undefined || current.name === expected.expectedName) &&
+    (expected.expectedAgent === undefined ||
+      current.agent === expected.expectedAgent ||
+      (current.agent === undefined && current.name !== undefined))
+  );
+}
+
+function probeAgent(
+  client: HerdrClient,
+  input: WatchInput,
+  intervalMs: number,
+): Effect.Effect<WatchOutcome, never> {
+  if (input.kind !== "agent_state") return Effect.never;
+
+  return Effect.gen(function*() {
+    let expected: ProbedAgentIdentity | undefined;
+
+    while (true) {
+      const observation = yield* client
+        .request({
+          method: "agent.get",
+          params: { target: input.target ?? "" },
+        })
+        .pipe(
+          Effect.match({
+            onFailure: (error) => ({ error } as const),
+            onSuccess: (result) => ({ result } as const),
+          }),
+        );
+
+      if ("error" in observation) {
+        const outcome = classifyWatchError(observation.error);
+        if (outcome.kind === "targetGone") return outcome;
+      } else if (observation.result.type === "agent_info") {
+        const current = observation.result.agent;
+        if (expected !== undefined && !probedAgentIdentityMatches(current, expected)) {
+          return {
+            kind: "targetGone",
+            code: "agent_replaced",
+            failure: "agent identity changed while the watch was active",
+          };
+        }
+        expected ??= {
+          terminalId: current.terminal_id,
+          expectedName: current.name === input.target ? current.name : undefined,
+          expectedAgent: current.agent,
+        };
+        if (watchedAgentStatuses(input).includes(current.agent_status)) {
+          return { kind: "matched", result: observation.result };
+        }
+      }
+
+      yield* Effect.sleep(intervalMs);
+    }
+  });
 }
 
 function terminalStatus(value: unknown): Exclude<WatchStatus, "running"> | undefined {
@@ -254,6 +331,8 @@ function wakeInstruction(status: Exclude<WatchStatus, "running">): string {
 
 export interface WatchRegistryOptions {
   readonly client: HerdrClient;
+  /** Internal health cadence. The public tool does not expose this tuning knob. */
+  readonly agentProbeIntervalMs?: number;
   readonly sendMessage: (
     message: {
       customType: string;
@@ -281,36 +360,58 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
   const activeRecords = new Map<string, WatchRecord>();
   const terminalReceipts = new Map<string, WatchReceipt>();
   const now = options.now ?? Date.now;
+  const agentProbeIntervalMs = Math.max(
+    1,
+    options.agentProbeIntervalMs ?? DEFAULT_AGENT_PROBE_INTERVAL_MS,
+  );
   let generation = 0;
   let shuttingDown = false;
 
   const machine = setup({
     actors: {
+      agentProbe: fromCallback<EventObject, WatchInput>(({ input, sendBack }) => {
+        const controller = new AbortController();
+        let disposed = false;
+        void Effect.runPromise(
+          probeAgent(options.client, input, agentProbeIntervalMs),
+          { signal: controller.signal },
+        ).then(
+          (outcome) => {
+            if (!disposed) sendBack({ type: "SETTLED", outcome });
+          },
+          () => {
+            // Interruption is owned by a terminal transition or session shutdown.
+          },
+        );
+        return () => {
+          disposed = true;
+          controller.abort();
+        };
+      }),
       waitSocket: fromCallback<EventObject, WatchInput>(({ input, sendBack }) => {
-          const controller = new AbortController();
-          let disposed = false;
-          const effect = watchRequest(options.client, input, () => {
-            if (!disposed) sendBack({ type: "WRITTEN" });
-          }).pipe(
-            Effect.match({
-              onFailure: classifyWatchError,
-              onSuccess: (result): WatchOutcome => ({ kind: "matched", result }),
-            }),
-          );
-          void Effect.runPromise(effect, { signal: controller.signal }).then(
-            (outcome) => {
-              if (!disposed) sendBack({ type: "SETTLED", outcome });
-            },
-            () => {
-              // Interruption is owned by CANCEL or session shutdown.
-            },
-          );
-          return () => {
-            disposed = true;
-            controller.abort();
-          };
-        },
-      ),
+        const controller = new AbortController();
+        let disposed = false;
+        const effect = watchRequest(options.client, input, () => {
+          if (!disposed) sendBack({ type: "WRITTEN" });
+        }).pipe(
+          Effect.match({
+            onFailure: classifyWatchError,
+            onSuccess: (result): WatchOutcome => ({ kind: "matched", result }),
+          }),
+        );
+        void Effect.runPromise(effect, { signal: controller.signal }).then(
+          (outcome) => {
+            if (!disposed) sendBack({ type: "SETTLED", outcome });
+          },
+          () => {
+            // Interruption is owned by CANCEL or session shutdown.
+          },
+        );
+        return () => {
+          disposed = true;
+          controller.abort();
+        };
+      }),
     },
     types: {
       context: {} as WatchContext,
@@ -324,10 +425,16 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     states: {
       active: {
         initial: "starting",
-        invoke: {
-          input: ({ context }) => context,
-          src: "waitSocket",
-        },
+        invoke: [
+          {
+            input: ({ context }) => context,
+            src: "waitSocket",
+          },
+          {
+            input: ({ context }) => context,
+            src: "agentProbe",
+          },
+        ],
         states: {
           starting: {
             on: { WRITTEN: { target: "running" } },
@@ -355,6 +462,8 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
             },
             {
               actions: assign({
+                code: ({ event }) =>
+                  event.outcome.kind === "targetGone" ? event.outcome.code : undefined,
                 failure: ({ event }) =>
                   "failure" in event.outcome ? event.outcome.failure : undefined,
               }),

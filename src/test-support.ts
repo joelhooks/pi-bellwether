@@ -37,6 +37,13 @@ export async function startFakeHerdrServer(
   const server: Server = createServer((socket) => {
     sockets.add(socket);
     connectionCount += 1;
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE" && error.code !== "ECONNRESET") {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    });
     let data = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
       data = Buffer.concat([data, chunk]);

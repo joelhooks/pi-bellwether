@@ -9,6 +9,7 @@ Project memory for the Pi ↔ Herdr integration package.
 ## Projects
 
 - [Async Herdr ping waits](./projects/async-herdr-ping-wait.svx)
+- [Dead-agent watch liveness](./projects/dead-agent-watch-liveness.svx)
 
 ## Resources
 

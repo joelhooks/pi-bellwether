@@ -131,6 +131,55 @@ describe("Herdr watch XState lifecycle", () => {
     ).toBe("targetGone");
   });
 
+  test("detects a dead agent when the wait socket never emits a release event", async () => {
+    let probes = 0;
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.wait") return;
+      if (request.method === "agent.get") {
+        probes += 1;
+        if (probes <= 2) {
+          socket.end(
+            success(request, {
+              type: "agent_info",
+              agent: agentInfo({
+                agent: probes === 1 ? "pi" : undefined,
+                agent_status: "working",
+              }),
+            }),
+          );
+          return;
+        }
+        socket.end(failure(request, "agent_not_found", "agent died back to shell"));
+      }
+    });
+    servers.push(server);
+    const messages: unknown[] = [];
+    const registry = createWatchRegistry({
+      agentProbeIntervalMs: 5,
+      client: createHerdrClient({ socketPath: server.socketPath }),
+      sendMessage(message) {
+        messages.push(message);
+      },
+    });
+
+    const started = registry.start(
+      { kind: "agent_state", target: "worker", wake: "agent" },
+      { mode: "tui" },
+    );
+    const terminal = await waitForTerminal(() => registry.status(started.id));
+
+    expect(terminal.status).toBe("targetGone");
+    expect(terminal.code).toBe("agent_not_found");
+    expect(probes).toBeGreaterThanOrEqual(3);
+    expect(messages).toHaveLength(1);
+    const deadline = Date.now() + 1_000;
+    while (server.closedConnections() < server.connections() && Date.now() < deadline) {
+      await sleep(1);
+    }
+    expect(server.closedConnections()).toBe(server.connections());
+    await registry.shutdown();
+  });
+
   test("cancel closes its socket and never wakes", async () => {
     const server = await startFakeHerdrServer(() => {});
     servers.push(server);
@@ -178,13 +227,14 @@ describe("Herdr watch XState lifecycle", () => {
       await sleep(1);
     }
 
-    expect(server.connections()).toBe(2);
-    expect(server.closedConnections()).toBe(2);
+    expect(server.connections()).toBe(3);
+    expect(server.closedConnections()).toBe(3);
     expect(messages).toHaveLength(0);
   });
 
   test("stops terminal actors and bounds retained receipt history", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") return;
       socket.end(success(request, resultForMethod(request.method)));
     });
     servers.push(server);

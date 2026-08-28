@@ -1,0 +1,37 @@
+---
+title: "Dead-agent watch liveness"
+type: "project"
+status: "active"
+created_at: "2026-08-27"
+privacy: "private"
+tags:
+  - bellwether
+  - herdr
+  - xstate
+  - liveness
+---
+
+# Dead-agent watch liveness
+
+## Symptom
+
+An agent can crash and return its pane to a live shell. If Herdr does not emit a release event, an event-only `agent.wait` socket stays open forever. This repeats the failure recorded in the system Brain at `.brain/resources/patterns/pi-narrow-pane-tui-crash.svx`.
+
+## Root cause
+
+Bellwether trusted the wait socket as its only observation source. Herdr 0.7.5 probes `agent.get` when an event arrives or an explicit timeout expires. A watch with no timeout has no independent liveness edge when the release event is absent.
+
+## Fix
+
+The XState watch races two invoked actors while it is active:
+
+1. The existing direct `agent.wait` socket observes status events.
+2. An Effect loop makes a bounded one-request `agent.get` probe every five seconds.
+
+An explicit `agent_not_found`, `agent_not_running`, or changed terminal/agent identity settles the watch as `targetGone`. Matching agent status settles as `matched`. Transient probe errors leave the event-driven wait in control. Any terminal transition or cancellation interrupts both actors and closes their exact sockets.
+
+Pane-output watches do not run agent probes.
+
+## Regression boundary
+
+`src/watch.test.ts` simulates a silent `agent.wait` socket while successive `agent.get` probes change from `working` to `agent_not_found`. The watch must settle as `targetGone`, preserve the error code, wake once, and close every socket.

@@ -11,6 +11,7 @@ Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only 
 - Effect 4.0.0-beta.99 owns socket path resolution, one newline-delimited JSON request per socket, Schema decoding, typed errors, timeouts, interruption, and cleanup.
 - XState 5.32.5 owns each watch lifecycle: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
 - Each watch owns one direct Herdr wait socket. Watches do not shell out, spawn `herdr`, or pool connections.
+- Agent-state watches also use bounded one-request `agent.get` probes every five seconds. A crashed TUI that returns to a live shell settles as `targetGone` even when Herdr emits no release event.
 - Active watches render in a compact Pi widget with a live spinner, phase, target, and elapsed time. The widget hides when no watch is active.
 - Herdr `error.code` determines timeout and target-loss states. Error prose does not.
 
@@ -48,7 +49,7 @@ Initial kinds:
 - `agent_state`
 - `pane_output`
 
-`start` returns a cloneable running receipt immediately. Wake policies are `agent`, `notify`, and `silent`. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
+`start` returns a cloneable running receipt immediately. Wake policies are `agent`, `notify`, and `silent`. Agent-state watches race the event-driven wait against a five-second liveness probe. Explicit `agent_not_found`, `agent_not_running`, or identity replacement settles as `targetGone`; transient probe failures do not override the wait. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
 
 The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. `src/watch.ts` keeps a typed future adapter seam without duplicating workflow leases or state.
 
