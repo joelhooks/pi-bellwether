@@ -40,7 +40,7 @@ Actions: `list`, `get`, `start`, `prompt`, `read`, `send_keys`, `focus`, `rename
 
 Agent startup uses `timeoutSeconds`; `120` means two minutes. There is no ambiguous public `timeout` field.
 
-There is no `wait` action or `wait` parameter. `prompt` sends one bounded `agent.prompt` request with no wait options. It starts no implicit watch.
+There is no public `wait` action or `wait` parameter. `prompt` first resolves the target to its stable pane ID, then performs a bounded delivery handshake. Bellwether asks Herdr for `working` state with one absolute 30-second wall-clock deadline. A successful response is proof that Herdr observed the agent alive and working. If the target is already working, Bellwether submits atomically without asking Herdr to wait for a later turn transition; the prompt response must still report working. This avoids a false timeout while a long current turn queues the prompt. Herdr 0.7.5 can return `agent_prompt_stalled` after five seconds even when Pi starts working just after its fixed gate. Bellwether then spends only the unused part of the original 30-second deadline on `agent.wait`, without resubmitting the prompt. If neither path observes `working`, the call returns a timeout. It does not wait for completion and starts no watch.
 
 ### `herdr_watch`
 

@@ -13,7 +13,7 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - Effect 4.0.0-beta.99 owns path resolution, framing, Schema decoding, typed errors, timeouts, interruption, and socket cleanup.
 - XState 5.32.5 owns watch lifecycle only: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
 - Each `herdr_watch` owns one direct wait socket. It never shells out or starts a child process.
-- `herdr_agent prompt` is submit-only. It includes no wait options and starts no implicit watch.
+- `herdr_agent prompt` is a bounded delivery handshake. Resolve a stable pane ID, submit once, and require Herdr-observed `working` state within one 30-second proof deadline. A stall recovery may use `agent.wait`; it must never resubmit or wait for completion. The public schema exposes no wait options, and prompt starts no watch.
 - Use Herdr `error.code`. Do not classify errors from message text.
 - Cancel and `session_shutdown` close exact owned sockets and suppress late wakes.
 - Tool `details` must remain structured-clone-safe plain data.

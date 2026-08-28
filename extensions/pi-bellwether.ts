@@ -21,6 +21,7 @@ import {
   createHerdrClient,
   DEFAULT_REQUEST_TIMEOUT_MS,
   HERDR_TRANSPORT_GRACE_MS,
+  HerdrTimeoutError,
 } from "../src/herdr-client.ts";
 import type {
   HerdrClient,
@@ -54,12 +55,35 @@ import {
 
 const MAX_ACTIVE_PING_WAITS = 32;
 const BELLWETHER_PROTOCOL = 1;
+const PROMPT_PROOF_OF_LIFE_TIMEOUT_MS = 30_000;
 const MAX_WATCH_TIMEOUT_SECONDS = Math.floor(MAX_WATCH_TIMEOUT_MS / 1_000);
 
 export function agentStartClientTimeoutMs(
   serverTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): number {
   return serverTimeoutMs + HERDR_TRANSPORT_GRACE_MS;
+}
+
+export function agentPromptClientTimeoutMs(
+  proofTimeoutMs = PROMPT_PROOF_OF_LIFE_TIMEOUT_MS,
+): number {
+  return proofTimeoutMs;
+}
+
+export function remainingPromptProofTimeoutMs(
+  startedAtMs: number,
+  nowMs = Date.now(),
+): number {
+  const elapsedMs = Math.max(0, nowMs - startedAtMs);
+  return Math.max(0, PROMPT_PROOF_OF_LIFE_TIMEOUT_MS - elapsedMs);
+}
+
+function promptProofTimeoutError(): HerdrTimeoutError {
+  return new HerdrTimeoutError({
+    operation: "agent.prompt proof of life",
+    timeoutMs: PROMPT_PROOF_OF_LIFE_TIMEOUT_MS,
+    message: `agent.prompt proof of life timed out after ${PROMPT_PROOF_OF_LIFE_TIMEOUT_MS}ms`,
+  });
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -329,6 +353,115 @@ async function runRequest(
   );
   if (!outcome.ok) throw requestFailure(outcome.error);
   return outcome.result;
+}
+
+async function runPromptWithProofOfLife(
+  client: HerdrClient,
+  target: string,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<{
+  result: HerdrResult;
+  recoveredAfterStall: boolean;
+  alreadyWorking: boolean;
+  targetPaneId: string;
+}> {
+  const resolved = await runRequest(
+    client,
+    { method: "agent.get", params: { target } },
+    signal,
+  );
+  const resolvedAgent = recordField(resolved, "agent");
+  const targetPaneId = requiredStringField(resolvedAgent, "pane_id");
+  const alreadyWorking = stringField(resolvedAgent, "agent_status") === "working";
+  const proofStartedAtMs = Date.now();
+  if (alreadyWorking) {
+    const submitted = await runRequest(
+      client,
+      {
+        method: "agent.prompt",
+        params: { target: targetPaneId, text: prompt },
+      },
+      signal,
+    );
+    const submittedAgent = recordField(submitted, "agent");
+    if (stringField(submittedAgent, "agent_status") === "working") {
+      return {
+        result: submitted,
+        recoveredAfterStall: false,
+        alreadyWorking: true,
+        targetPaneId,
+      };
+    }
+    const remainingTimeoutMs = remainingPromptProofTimeoutMs(proofStartedAtMs);
+    if (remainingTimeoutMs === 0) throw requestFailure(promptProofTimeoutError());
+    const result = await runRequest(
+      client,
+      {
+        method: "agent.wait",
+        params: {
+          target: targetPaneId,
+          until: ["working"],
+          timeout_ms: remainingTimeoutMs,
+        },
+        timeoutMs: remainingTimeoutMs,
+      },
+      signal,
+    );
+    return {
+      result,
+      recoveredAfterStall: false,
+      alreadyWorking: true,
+      targetPaneId,
+    };
+  }
+  const effect = client
+    .request({
+      method: "agent.prompt",
+      params: {
+        target: targetPaneId,
+        text: prompt,
+        wait: {
+          until: ["working"],
+          timeout_ms: PROMPT_PROOF_OF_LIFE_TIMEOUT_MS,
+        },
+      },
+      timeoutMs: agentPromptClientTimeoutMs(),
+    })
+    .pipe(
+      Effect.map((result) => ({ result, recoveredAfterStall: false })),
+      Effect.catchTag("HerdrApiError", (error) => {
+        if (error.code !== "agent_prompt_stalled") return Effect.fail(error);
+        const remainingTimeoutMs = remainingPromptProofTimeoutMs(proofStartedAtMs);
+        if (remainingTimeoutMs === 0) {
+          return Effect.fail(promptProofTimeoutError());
+        }
+        return client
+          .request({
+            method: "agent.wait",
+            params: {
+              target: targetPaneId,
+              until: ["working"],
+              timeout_ms: remainingTimeoutMs,
+            },
+            timeoutMs: remainingTimeoutMs,
+          })
+          .pipe(
+            Effect.map((result) => ({ result, recoveredAfterStall: true })),
+          );
+      }),
+    );
+  const outcome = await Effect.runPromise(
+    effect.pipe(
+      Effect.match({
+        onFailure: (error) => ({ ok: false as const, error }),
+        onSuccess: (result) => ({ ok: true as const, result }),
+      }),
+    ),
+    { signal },
+  );
+  if (!outcome.ok) throw requestFailure(outcome.error);
+  return { ...outcome.result, alreadyWorking: false, targetPaneId };
 }
 
 async function currentPane(client: HerdrClient, signal?: AbortSignal): Promise<JsonRecord> {
@@ -943,7 +1076,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_agent",
     label: "Herdr Agent",
     description:
-      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds. Prompt submits one bounded agent.prompt request with no wait options and starts no watch. External-state observation belongs only in herdr_watch.",
+      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds. Prompt waits up to 30 seconds for Herdr-observed working state as proof of life, but does not wait for completion or start a watch. External-state observation belongs only in herdr_watch.",
     promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
     parameters: herdrAgentParameters,
     async execute(_id, params, signal) {
@@ -999,17 +1132,22 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           if (!params.target || !params.prompt) {
             throw new Error("target and prompt are required for prompt");
           }
-          const result = await runRequest(
+          const proof = await runPromptWithProofOfLife(
             client,
-            {
-              method: "agent.prompt",
-              params: { target: params.target, text: params.prompt },
-            },
+            params.target,
+            params.prompt,
             signal,
           );
-          const agent = recordField(result, "agent");
-          return toolText(`Prompt accepted by ${summarizeAgent(agent)}`, {
+          const agent = recordField(proof.result, "agent");
+          return toolText(`Proof of life from ${summarizeAgent(agent)}`, {
             action: params.action,
+            proofOfLife: {
+              status: stringField(agent, "agent_status"),
+              timeoutMs: PROMPT_PROOF_OF_LIFE_TIMEOUT_MS,
+              recoveredAfterStall: proof.recoveredAfterStall,
+              alreadyWorking: proof.alreadyWorking,
+              targetPaneId: proof.targetPaneId,
+            },
             agent,
           });
         }

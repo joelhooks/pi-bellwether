@@ -3,17 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import bellwetherExtension, {
+  agentPromptClientTimeoutMs,
   agentStartClientTimeoutMs,
+  remainingPromptProofTimeoutMs,
   renderWatchLivenessWidget,
 } from "../extensions/pi-bellwether.ts";
 import type { WatchReceipt } from "./watch.ts";
 import {
   agentInfo,
+  failure,
   paneInfo,
   resultForMethod,
   startFakeHerdrServer,
@@ -311,13 +314,18 @@ describe("Bellwether public surface", () => {
     await handlers.get("session_shutdown")?.();
   });
 
-  test("prompt sends one bounded request with no wait options and starts no watch", async () => {
+  test("prompt sends bounded identity and proof-of-life requests and starts no watch", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       socket.end(
-        success(request, {
-          type: "agent_prompted",
-          agent: agentInfo({ agent_status: "working" }),
-        }),
+        success(
+          request,
+          request.method === "agent.get"
+            ? resultForMethod(request.method)
+            : {
+                type: "agent_prompted",
+                agent: agentInfo({ agent_status: "working" }),
+              },
+        ),
       );
     });
     servers.push(server);
@@ -343,11 +351,19 @@ describe("Bellwether public surface", () => {
       context(),
     );
 
-    expect(server.requests).toHaveLength(1);
-    expect(server.requests[0]).toEqual(
+    expect(server.requests).toHaveLength(2);
+    expect(server.requests[0]).toMatchObject({
+      method: "agent.get",
+      params: { target: "worker" },
+    });
+    expect(server.requests[1]).toEqual(
       expect.objectContaining({
         method: "agent.prompt",
-        params: { target: "worker", text: "Do the bounded task." },
+        params: {
+          target: "w1:p1",
+          text: "Do the bounded task.",
+          wait: { until: ["working"], timeout_ms: 30_000 },
+        },
       }),
     );
     expect(watches.content[0]?.text).toContain("No Herdr watches");
@@ -671,7 +687,15 @@ describe("Herdr 0.7.5 action parity", () => {
       {
         params: { action: "prompt", target: "worker", prompt: "Do it." },
         expected: [
-          { method: "agent.prompt", params: { target: "worker", text: "Do it." } },
+          { method: "agent.get", params: { target: "worker" } },
+          {
+            method: "agent.prompt",
+            params: {
+              target: "w1:p1",
+              text: "Do it.",
+              wait: { until: ["working"], timeout_ms: 30_000 },
+            },
+          },
         ],
       },
       {
@@ -763,6 +787,258 @@ describe("Herdr 0.7.5 action parity", () => {
   test("agent.start gives Herdr its deadline and the socket a transport grace", () => {
     expect(agentStartClientTimeoutMs()).toBe(35_000);
     expect(agentStartClientTimeoutMs(8_000)).toBe(13_000);
+  });
+
+  test("agent.prompt returns a structured proof-of-life receipt", async () => {
+    const { result } = await executeAction("herdr_agent", {
+      action: "prompt",
+      target: "worker",
+      prompt: "Do it.",
+    });
+
+    expect(result.content[0]?.text).toContain("Proof of life");
+    expect(result.details).toMatchObject({
+      action: "prompt",
+      proofOfLife: {
+        status: "working",
+        timeoutMs: 30_000,
+        recoveredAfterStall: false,
+        alreadyWorking: false,
+        targetPaneId: "w1:p1",
+      },
+    });
+  });
+
+  test("agent.prompt treats an already-working target as live without waiting for turn settlement", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(
+        success(
+          request,
+          request.method === "agent.get"
+            ? {
+                type: "agent_info",
+                agent: agentInfo({ agent_status: "working" }),
+              }
+            : {
+                type: "agent_prompted",
+                agent: agentInfo({ agent_status: "working" }),
+              },
+        ),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const agent = tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Queue this." },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests).toMatchObject([
+      { method: "agent.get", params: { target: "worker" } },
+      {
+        method: "agent.prompt",
+        params: { target: "w1:p1", text: "Queue this." },
+      },
+    ]);
+    expect(server.requests[1]?.params).not.toHaveProperty("wait");
+    expect(result.details).toMatchObject({
+      proofOfLife: { status: "working", alreadyWorking: true },
+    });
+  });
+
+  test("agent.prompt rechecks working when the target settles during submission", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      const status = request.method === "agent.get" || request.method === "agent.wait"
+        ? "working"
+        : "idle";
+      socket.end(
+        success(request, {
+          type: request.method === "agent.prompt" ? "agent_prompted" : "agent_info",
+          agent: agentInfo({ agent_status: status }),
+        }),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const agent = tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Queue this." },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.get",
+      "agent.prompt",
+      "agent.wait",
+    ]);
+    expect(server.requests.filter((request) => request.method === "agent.prompt")).toHaveLength(1);
+    expect(result.details).toMatchObject({
+      proofOfLife: { status: "working", alreadyWorking: true },
+    });
+  });
+
+  test("agent.prompt uses the proof deadline as an absolute client deadline", () => {
+    expect(agentPromptClientTimeoutMs()).toBe(30_000);
+    expect(agentPromptClientTimeoutMs(8_000)).toBe(8_000);
+  });
+
+  test("agent.prompt recovers from Herdr's five-second stall gate without resubmitting", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, resultForMethod(request.method)));
+        return;
+      }
+      if (request.method === "agent.prompt") {
+        socket.end(
+          failure(
+            request,
+            "agent_prompt_stalled",
+            "agent prompt produced no observed state change",
+          ),
+        );
+        return;
+      }
+      socket.end(
+        success(request, {
+          type: "agent_info",
+          agent: agentInfo({ agent_status: "working" }),
+        }),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const agent = tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Do it." },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.details).toMatchObject({
+      proofOfLife: {
+        status: "working",
+        recoveredAfterStall: true,
+        alreadyWorking: false,
+      },
+    });
+    expect(server.requests).toMatchObject([
+      { method: "agent.get", params: { target: "worker" } },
+      {
+        method: "agent.prompt",
+        params: {
+          target: "w1:p1",
+          wait: { until: ["working"], timeout_ms: 30_000 },
+        },
+      },
+      {
+        method: "agent.wait",
+        params: {
+          target: "w1:p1",
+          until: ["working"],
+          timeout_ms: expect.any(Number),
+        },
+      },
+    ]);
+    const recoveryTimeoutMs = server.requests[2]?.params.timeout_ms;
+    expect(recoveryTimeoutMs).toEqual(expect.any(Number));
+    expect(recoveryTimeoutMs as number).toBeGreaterThan(0);
+    expect(recoveryTimeoutMs as number).toBeLessThanOrEqual(30_000);
+  });
+
+  test("proof-of-life recovery spends only the original deadline remainder", () => {
+    expect(remainingPromptProofTimeoutMs(1_000, 6_000)).toBe(25_000);
+    expect(remainingPromptProofTimeoutMs(1_000, 31_001)).toBe(0);
+  });
+
+  test("agent.prompt does not start recovery after its proof deadline", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(
+        request.method === "agent.get"
+          ? success(request, resultForMethod(request.method))
+          : failure(request, "agent_prompt_stalled", "late stall"),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const agent = tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(1_000)
+      .mockReturnValue(31_001);
+
+    try {
+      await expect(
+        agent.execute(
+          "call-1",
+          { action: "prompt", target: "worker", prompt: "Do it." },
+          undefined,
+          undefined,
+          context(),
+        ),
+      ).rejects.toThrow("timed out after 30000ms");
+    } finally {
+      now.mockRestore();
+    }
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.get",
+      "agent.prompt",
+    ]);
+  });
+
+  test("agent.prompt surfaces timeout when neither proof path sees working", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, resultForMethod(request.method)));
+        return;
+      }
+      socket.end(
+        failure(
+          request,
+          request.method === "agent.prompt" ? "agent_prompt_stalled" : "timeout",
+          "no observed working state",
+        ),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const agent = tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    await expect(
+      agent.execute(
+        "call-1",
+        { action: "prompt", target: "worker", prompt: "Do it." },
+        undefined,
+        undefined,
+        context(),
+      ),
+    ).rejects.toThrow("timeout");
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.get",
+      "agent.prompt",
+      "agent.wait",
+    ]);
   });
 
   test("session_start records no socket path and opens no Herdr socket", async () => {
