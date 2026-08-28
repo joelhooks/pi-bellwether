@@ -11,6 +11,7 @@ Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only 
 - Effect 4.0.0-beta.99 owns socket path resolution, one newline-delimited JSON request per socket, Schema decoding, typed errors, timeouts, interruption, and cleanup.
 - XState 5.32.5 owns each watch lifecycle: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
 - Each watch owns one direct Herdr wait socket. Watches do not shell out, spawn `herdr`, or pool connections.
+- Active watches render in a compact Pi widget with a live spinner, phase, target, and elapsed time. The widget hides when no watch is active.
 - Herdr `error.code` determines timeout and target-loss states. Error prose does not.
 
 `herdr_ping_wait` remains an explicit degraded crash and turn fallback. It is the only child-process wait path. `herdr_watch` never calls it.

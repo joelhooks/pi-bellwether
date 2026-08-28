@@ -5,10 +5,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 import bellwetherExtension, {
   agentStartClientTimeoutMs,
+  renderWatchLivenessWidget,
 } from "../extensions/pi-bellwether.ts";
+import type { WatchReceipt } from "./watch.ts";
 import {
   agentInfo,
   paneInfo,
@@ -98,6 +101,7 @@ function context() {
       notify() {},
       editor: async () => undefined,
       confirm: async () => true,
+      setWidget() {},
     },
   };
 }
@@ -118,6 +122,117 @@ setTimeout(() => {
   await chmod(path, 0o755);
   return path;
 }
+
+describe("Bellwether watch liveness widget", () => {
+  const theme = {
+    bold: (text: string) => text,
+    fg: (_color: "accent" | "dim" | "muted", text: string) => text,
+  };
+
+  test("renders active watches with a moving frame, phase, target, and age", () => {
+    const watches: WatchReceipt[] = [
+      {
+        id: "watch-1",
+        kind: "agent_state",
+        label: "security review",
+        status: "running",
+        phase: "running",
+        startedAt: "2026-08-28T00:00:00.000Z",
+        wake: "agent",
+        target: "attestation_security",
+      },
+      {
+        id: "watch-2",
+        kind: "pane_output",
+        label: "scratch smoke",
+        status: "running",
+        phase: "starting",
+        startedAt: "2026-08-28T00:01:30.000Z",
+        wake: "silent",
+        pane: "w6N:p1",
+      },
+    ];
+
+    expect(
+      renderWatchLivenessWidget(
+        watches,
+        Date.parse("2026-08-28T00:02:00.000Z"),
+        1,
+        100,
+        theme,
+      ),
+    ).toEqual([
+      "⠙ Bellwether waiting · 2 watches · oldest 2m",
+      "  watching security review · attestation_security · 2m",
+      "  connecting scratch smoke · w6N:p1 · 30s",
+    ]);
+  });
+
+  test("caps detail rows and never exceeds the terminal width", () => {
+    const watches: WatchReceipt[] = Array.from({ length: 5 }, (_, index) => ({
+      id: `watch-${index}`,
+      kind: "agent_state",
+      label: `long worker label ${index} that must truncate safely`,
+      status: "running",
+      phase: "running",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      wake: "agent",
+      target: `worker-${index}`,
+    }));
+
+    const lines = renderWatchLivenessWidget(
+      watches,
+      Date.parse("2026-08-28T00:02:00.000Z"),
+      0,
+      40,
+      theme,
+    );
+    expect(lines).toHaveLength(5);
+    expect(lines.at(-1)).toBe("  +2 more active");
+    expect(lines.every((line) => visibleWidth(line) <= 40)).toBe(true);
+  });
+
+  test("hides when no watch is active or the terminal is too narrow", () => {
+    expect(renderWatchLivenessWidget([], Date.now(), 0, 100, theme)).toEqual([]);
+    expect(
+      renderWatchLivenessWidget(
+        [
+          {
+            id: "watch-1",
+            kind: "agent_state",
+            label: "done",
+            status: "matched",
+            startedAt: "2026-08-28T00:00:00.000Z",
+            finishedAt: "2026-08-28T00:00:01.000Z",
+            wake: "agent",
+          },
+        ],
+        Date.now(),
+        0,
+        100,
+        theme,
+      ),
+    ).toEqual([]);
+    expect(
+      renderWatchLivenessWidget(
+        [
+          {
+            id: "watch-1",
+            kind: "agent_state",
+            label: "active",
+            status: "running",
+            startedAt: "2026-08-28T00:00:00.000Z",
+            wake: "agent",
+          },
+        ],
+        Date.now(),
+        0,
+        20,
+        theme,
+      ),
+    ).toEqual([]);
+  });
+});
 
 describe("Bellwether public surface", () => {
   test("registers four structured tools plus the degraded fallback and no legacy tools", () => {
