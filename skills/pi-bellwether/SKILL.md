@@ -12,7 +12,7 @@ Bellwether owns generic Herdr control. `herdr-workflow` owns durable workflow tr
 
 1. Use `herdr_layout` to inspect or create topology.
 2. Use `herdr_agent start` only with an existing available pane.
-3. Use `herdr_agent prompt` to submit one prompt. It returns after Herdr accepts the prompt.
+3. Use `herdr_agent prompt` to submit one prompt. It returns after Herdr observes `working` state, or fails with a bounded proof-of-life error.
 4. Arm `herdr_watch` only when a separate external condition matters.
 5. Inspect the terminal receipt and target output before claiming completion.
 6. Cancel watches that no longer matter.
@@ -26,7 +26,7 @@ Bellwether owns generic Herdr control. `herdr-workflow` owns durable workflow tr
 
 Public deadlines use `timeoutSeconds`. Bellwether converts them to protocol milliseconds at the boundary. Never pass `timeout`.
 
-The action tools contain no wait path. `herdr_agent prompt` starts no watch.
+The public action tools contain no wait action or wait parameter. `herdr_agent prompt` resolves the target to its stable pane ID, then performs one internal delivery handshake with Herdr: wait for `working`, one absolute 30-second wall-clock deadline. An already-working target uses atomic submission plus the prompt response's working state; Bellwether does not wait for a later turn transition. Herdr 0.7.5 has a fixed five-second stall gate for non-working targets. If that gate fires, Bellwether uses only the unused part of the original deadline on `agent.wait`, without sending the prompt again. A timeout means neither proof path observed `working`. Success proves liveness, not completion. It starts no watch.
 
 ## Watch receipts
 

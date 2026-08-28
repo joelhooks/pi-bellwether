@@ -1,0 +1,48 @@
+---
+title: "Prompt proof of life"
+type: "project"
+status: "active"
+created_at: "2026-08-28"
+privacy: "private"
+tags:
+  - bellwether
+  - herdr
+  - delivery
+---
+
+# Prompt proof of life
+
+## Problem
+
+A successful socket write proves that Herdr accepted bytes. It does not prove that the coding agent became active. Bellwether previously returned `Prompt accepted` immediately, so an ineffective submission looked successful until a later read or watch exposed it.
+
+## Decision
+
+`herdr_agent prompt` uses Herdr protocol 17's existing prompt wait as a bounded delivery handshake:
+
+```json
+{
+  "wait": {
+    "until": ["working"],
+    "timeout_ms": 30000
+  }
+}
+```
+
+The public tool still exposes no wait action or wait parameter. Proof of life is mandatory delivery behavior, not an optional completion wait.
+
+Herdr verifies target identity, submits the prompt atomically, and observes agent lifecycle state. Success returns only after Herdr observes `working`.
+
+Live dogfood found two protocol edges. Pi visibly entered `Working...`, but Herdr's fixed five-second effect gate returned `agent_prompt_stalled` while the state sequence still reported idle. Then Pi changed its Herdr agent name from the launch name to its session name. A fallback by the old name would have missed the live worker.
+
+Bellwether first resolves the caller's target to a stable pane ID. It uses that pane ID for submission and recovery. If the target already reports working, Bellwether submits without Herdr's turn-settlement wait and requires the prompt response to still report working. If the target settles during submission, a standalone `agent.wait` uses the remaining deadline. This prevents a long current turn from causing a false timeout and duplicate retry. For non-working targets, a standalone `agent.wait --until working` immediately confirmed working after the stall. Bellwether therefore recovers only that error with `agent.wait`. It calculates the unused part of the original 30-second proof deadline and never starts a fresh deadline. It never resubmits the prompt. Proof requests use the remaining wall-clock time as both the Herdr and client deadline; they add no transport grace.
+
+A successful handshake proves liveness only. It does not prove task completion, claim receipt, workflow readiness, or that a prompt sent to an already-working agent started a distinct turn. Those facts remain watch- or receipt-driven.
+
+## Live verification
+
+The first raw Herdr prompt dogfood hit `agent_prompt_stalled` after five seconds while Pi visibly worked. A follow-up `agent.wait` confirmed `working`. After the Bellwether change, two exact-extension prompts returned structured proof of life in 435 ms and 419 ms. Both receipts named pane `w5E:pD`, reported `working`, and submitted one prompt.
+
+## Regression boundary
+
+Tests verify stable pane resolution, the exact prompt wire request, the absolute 30-second client deadline, the structured proof-of-life receipt, the already-working fast path, recovery through `agent.wait` without a second prompt, and timeout propagation when neither proof path observes working.
