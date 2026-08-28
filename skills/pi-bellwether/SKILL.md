@@ -40,7 +40,7 @@ Wake policies:
 - `notify`: UI notification only.
 - `silent`: receipt only.
 
-A lifecycle match is diagnostic. It does not prove a worker finished its task.
+Agent-state watches re-probe `agent.get` every five seconds. If a worker crashes back to a live shell without a Herdr release event, the watch settles as `targetGone` and wakes according to policy. A lifecycle match is diagnostic. It does not prove a worker finished its task.
 
 ## Close guard
 
