@@ -16,3 +16,4 @@ Project memory for the Pi ↔ Herdr integration package.
 ## Resources
 
 - [Extension shape](./resources/pi-bellwether-extension-shape.svx)
+- [Watch contract and deletion boundaries](./resources/watch-contract.svx)

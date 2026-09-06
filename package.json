@@ -1,6 +1,6 @@
 {
   "name": "@joelhooks/pi-bellwether",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bellwether 🐏🔔 — Effect-powered direct Herdr socket control and XState watch lifecycles for Pi.",
   "type": "module",
   "keywords": [

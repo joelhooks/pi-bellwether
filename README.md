@@ -46,6 +46,10 @@ There is no public `wait` action or `wait` parameter. `prompt` first resolves th
 
 Actions: `start`, `list`, `status`, `cancel`.
 
+`list` returns active watches only. Add `history: true` to include the retained terminal receipts. `status` still retrieves a finished watch by ID.
+
+Status and wake text include the target, failure code, and observed agent state or terminal match. Terminal evidence prefers the matched line and is limited to 12 lines / 2 KiB, with ANSI controls stripped and truncation marked. Full structured receipts remain in `details`. Read more output only when the excerpt is insufficient; an observed state or matching line does not prove task completion.
+
 Initial kinds:
 
 - `agent_state`
@@ -53,7 +57,7 @@ Initial kinds:
 
 `start` returns a cloneable running receipt immediately. The public timeout field is `timeoutSeconds`; `7200` means two hours. Bellwether converts seconds to Herdr milliseconds once at the extension boundary. Bellwether exposes no ambiguous public `timeout` field. Wake policies are `agent`, `notify`, and `silent`. Agent-state watches race the event-driven wait against a five-second liveness probe. Explicit `agent_not_found`, `agent_not_running`, or identity replacement settles as `targetGone`; transient probe failures do not override the wait. Cancel and `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
 
-The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. `src/watch.ts` keeps a typed future adapter seam without duplicating workflow leases or state.
+The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. Bellwether has no workflow-watch adapter. Add one only when a concrete consumer and result contract exist.
 
 ## Pi intercom
 
