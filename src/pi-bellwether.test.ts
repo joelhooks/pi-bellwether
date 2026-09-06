@@ -51,6 +51,7 @@ interface TestTool {
   readonly execute: (...args: unknown[]) => Promise<{
     readonly content: readonly { readonly text: string }[];
     readonly details?: unknown;
+    readonly isError?: boolean;
   }>;
 }
 
@@ -249,18 +250,36 @@ describe("Bellwether public surface", () => {
     ]);
   });
 
+  test("marks structured Bellwether control failures as failed tool results", async () => {
+    const { handlers } = harness();
+    const patch = await handlers.get("tool_result")?.({
+      toolName: "herdr_agent",
+      details: { ok: false, stage: "start" },
+    });
+    expect(patch).toEqual({ isError: true });
+  });
+
   test("tool schemas expose no wait, wait action, wait_output, or prompt settlement escape hatch", () => {
     const { tools } = harness();
+    const layoutSchema = tools.get("herdr_layout")?.parameters;
     const agentSchema = tools.get("herdr_agent")?.parameters;
     const paneSchema = tools.get("herdr_pane")?.parameters;
     const watchSchema = tools.get("herdr_watch")?.parameters;
-    if (!agentSchema || !paneSchema || !watchSchema) throw new Error("tools missing");
+    if (!layoutSchema || !agentSchema || !paneSchema || !watchSchema) {
+      throw new Error("tools missing");
+    }
 
-    const schemas = JSON.stringify({ agentSchema, paneSchema, watchSchema });
+    const schemas = JSON.stringify({ layoutSchema, agentSchema, paneSchema, watchSchema });
     expect(schemas).not.toContain('"wait"');
     expect(schemas).not.toContain("wait_output");
     expect(schemas).not.toContain("prompt_settle");
     expect(schemas).not.toContain("workflow_receipt");
+    expect(JSON.stringify(layoutSchema)).toContain("overview");
+    expect(JSON.stringify(layoutSchema)).toContain("workspace_rename");
+    expect(JSON.stringify(paneSchema)).toContain("rename");
+    expect((paneSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty(
+      "clearLabel",
+    );
 
     const agentProperties = (agentSchema as {
       properties?: Record<string, { description?: string }>;
@@ -524,6 +543,14 @@ describe("Herdr 0.7.5 action parity", () => {
     }> = [
       { params: { action: "current" }, expected: [currentRequest] },
       {
+        params: { action: "overview", workspace: "w1" },
+        expected: [
+          currentRequest,
+          { method: "pane.list", params: { workspace_id: "w1" } },
+          { method: "agent.list", params: {} },
+        ],
+      },
+      {
         params: { action: "workspace_list" },
         expected: [{ method: "workspace.list", params: {} }],
       },
@@ -551,6 +578,19 @@ describe("Herdr 0.7.5 action parity", () => {
         params: { action: "workspace_focus", workspace: "w2" },
         expected: [
           { method: "workspace.focus", params: { workspace_id: "w2" } },
+        ],
+      },
+      {
+        params: {
+          action: "workspace_rename",
+          workspace: "w2",
+          label: "Review workspace",
+        },
+        expected: [
+          {
+            method: "workspace.rename",
+            params: { workspace_id: "w2", label: "Review workspace" },
+          },
         ],
       },
       {
@@ -636,6 +676,24 @@ describe("Herdr 0.7.5 action parity", () => {
       {
         params: { action: "get", pane: "w1:p2" },
         expected: [{ method: "pane.get", params: { pane_id: "w1:p2" } }],
+      },
+      {
+        params: { action: "rename", pane: "w1:p2", label: "Review" },
+        expected: [
+          {
+            method: "pane.rename",
+            params: { pane_id: "w1:p2", label: "Review" },
+          },
+        ],
+      },
+      {
+        params: { action: "rename", pane: "w1:p2", clearLabel: true },
+        expected: [
+          {
+            method: "pane.rename",
+            params: { pane_id: "w1:p2", label: null },
+          },
+        ],
       },
       {
         params: { action: "run", pane: "w1:p2", command: "npm test" },
@@ -802,7 +860,10 @@ describe("Herdr 0.7.5 action parity", () => {
       message: string;
     }> = [
       { tool: "herdr_layout", params: { action: "workspace_focus" }, message: "workspace is required" },
+      { tool: "herdr_layout", params: { action: "workspace_rename", workspace: "w1" }, message: "workspace and label" },
       { tool: "herdr_layout", params: { action: "tab_focus" }, message: "tab is required" },
+      { tool: "herdr_pane", params: { action: "rename", pane: "w1:p2" }, message: "label or clearLabel" },
+      { tool: "herdr_pane", params: { action: "rename", pane: "w1:p2", label: "x", clearLabel: true }, message: "mutually exclusive" },
       { tool: "herdr_pane", params: { action: "run", pane: "w1:p2" }, message: "command is required" },
       { tool: "herdr_pane", params: { action: "send_text", pane: "w1:p2" }, message: "text is required" },
       { tool: "herdr_pane", params: { action: "send_keys", pane: "w1:p2" }, message: "keys is required" },
@@ -1036,21 +1097,34 @@ describe("Herdr 0.7.5 action parity", () => {
       .mockReturnValue(31_001);
 
     try {
-      await expect(
-        agent.execute(
-          "call-1",
-          { action: "prompt", target: "worker", prompt: "Do it." },
-          undefined,
-          undefined,
-          context(),
-        ),
-      ).rejects.toThrow("timed out after 30000ms");
+      const result = await agent.execute(
+        "call-1",
+        { action: "prompt", target: "worker", prompt: "Do it." },
+        undefined,
+        undefined,
+        context(),
+      );
+      expect(result.isError).toBe(true);
+      expect(result.details).toMatchObject({
+        ok: false,
+        stage: "proof_of_life",
+        primaryError: { tag: "HerdrTimeoutError", timeoutMs: 30_000 },
+        submission: { state: "submitted" },
+      });
+      const text = result.content[0]?.text ?? "";
+      expect(text).toContain("Failed stage: proof_of_life.");
+      expect(text).toContain("operation=agent.prompt proof of life");
+      expect(text).toContain("tag=HerdrTimeoutError");
+      expect(text).toContain("Stable pane: w1:p1");
+      expect(text).toContain("Submission state: submitted.");
+      expect(text).toContain("Do not resend blindly");
     } finally {
       now.mockRestore();
     }
     expect(server.requests.map((request) => request.method)).toEqual([
       "agent.get",
       "agent.prompt",
+      "pane.read",
     ]);
   });
 
@@ -1074,20 +1148,507 @@ describe("Herdr 0.7.5 action parity", () => {
     const agent = tools.get("herdr_agent");
     if (!agent) throw new Error("herdr_agent missing");
 
-    await expect(
-      agent.execute(
-        "call-1",
-        { action: "prompt", target: "worker", prompt: "Do it." },
-        undefined,
-        undefined,
-        context(),
-      ),
-    ).rejects.toThrow("timeout");
+    const result = await agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Do it." },
+      undefined,
+      undefined,
+      context(),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      ok: false,
+      stage: "proof_of_life",
+      primaryError: { code: "timeout", operation: "agent.wait" },
+      submission: { state: "submitted" },
+      diagnostic: { status: "failed" },
+    });
     expect(server.requests.map((request) => request.method)).toEqual([
       "agent.get",
       "agent.prompt",
       "agent.wait",
+      "pane.read",
     ]);
+  });
+
+  test("agent.start reports readiness as unknown unless Herdr proves interactive readiness", async () => {
+    for (const testCase of [
+      {
+        fields: { launch_pending: true, interactive_ready: false },
+        expected: "unknown",
+      },
+      {
+        fields: { launch_pending: false, interactive_ready: true },
+        expected: "proven",
+      },
+    ] as const) {
+      const server = await startFakeHerdrServer((request, socket) => {
+        socket.end(
+          success(request, {
+            type: "agent_started",
+            agent: agentInfo(testCase.fields),
+            argv: ["pi"],
+          }),
+        );
+      });
+      servers.push(server);
+      process.env.HERDR_SOCKET_PATH = server.socketPath;
+      const agent = harness().tools.get("herdr_agent");
+      if (!agent) throw new Error("herdr_agent missing");
+
+      const result = await agent.execute(
+        "call-1",
+        { action: "start", name: "worker", kind: "pi", pane: "w1:p1" },
+        undefined,
+        undefined,
+        context(),
+      );
+
+      expect(result.details).toMatchObject({
+        ok: true,
+        readiness: {
+          state: testCase.expected,
+          launchPending: testCase.fields.launch_pending,
+          interactiveReady: testCase.fields.interactive_ready,
+        },
+      });
+      expect(result.content[0]?.text).toContain(`readiness ${testCase.expected}`);
+    }
+  });
+
+  test("agent.start failure preserves its primary error and one bounded untrusted diagnostic", async () => {
+    const terminalText = `\u001b[31m${Array.from({ length: 20 }, (_, index) => `line-${index}-${"x".repeat(200)}`).join("\n")}\u001b[0m`;
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.start") {
+        socket.end(failure(request, "agent_pane_busy", "pane is busy"));
+        return;
+      }
+      socket.end(
+        success(request, {
+          type: "pane_read",
+          read: {
+            pane_id: "w1:p2",
+            workspace_id: "w1",
+            tab_id: "w1:t1",
+            source: "recent_unwrapped",
+            format: "text",
+            text: terminalText,
+            revision: 9,
+            truncated: false,
+          },
+        }),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "start", name: "worker", kind: "pi", pane: "w1:p2" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      ok: false,
+      stage: "start",
+      primaryError: { code: "agent_pane_busy", message: "pane is busy" },
+      resolvedIdentity: { paneId: "w1:p2" },
+      diagnostic: {
+        status: "captured",
+        evidence: { trust: "UNTRUSTED", paneId: "w1:p2", truncated: true },
+      },
+    });
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("Failed stage: start.");
+    expect(text).toContain("operation=agent.start");
+    expect(text).toContain("code=agent_pane_busy");
+    expect(text).toContain("Stable pane: w1:p2");
+    expect(text).toContain("Submission state: uncertain.");
+    expect(text).toContain("Do not resend blindly");
+    const diagnostic = (result.details as {
+      diagnostic: { evidence: { text: string; lines: number; bytes: number } };
+    }).diagnostic.evidence;
+    expect(diagnostic.text).not.toContain("\u001b[");
+    expect(diagnostic.lines).toBeLessThanOrEqual(12);
+    expect(diagnostic.bytes).toBeLessThanOrEqual(2_048);
+    expect(() => structuredClone(result.details)).not.toThrow();
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.start",
+      "pane.read",
+    ]);
+    expect(server.requests[1]).toMatchObject({
+      params: {
+        pane_id: "w1:p2",
+        source: "recent_unwrapped",
+        lines: 12,
+        format: "text",
+        strip_ansi: true,
+      },
+    });
+  });
+
+  test("diagnostic failure cannot replace the agent.start primary error", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(
+        failure(
+          request,
+          request.method === "agent.start" ? "agent_pane_busy" : "read_failed",
+          request.method === "agent.start" ? "primary failure" : "diagnostic failure",
+        ),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "start", name: "worker", kind: "pi", pane: "w1:p2" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.details).toMatchObject({
+      primaryError: { code: "agent_pane_busy", message: "primary failure" },
+      diagnostic: {
+        status: "failed",
+        error: { code: "read_failed", message: "diagnostic failure" },
+      },
+    });
+  });
+
+  test("failure receipt sanitizes and caps hostile primary and secondary messages", async () => {
+    const primaryMessage = `\u001b[31mPRIMARY-${"x".repeat(8_000)}\u001b[0m`;
+    const secondaryMessage = `\u001b[32mSECONDARY-${"y".repeat(8_000)}\u001b[0m`;
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(
+        failure(
+          request,
+          request.method === "agent.start" ? "agent_hostile" : "read_hostile",
+          request.method === "agent.start" ? primaryMessage : secondaryMessage,
+        ),
+      );
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "start", name: "worker", kind: "pi", pane: "w1:p2" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    const text = result.content[0]?.text ?? "";
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(4_096);
+    expect(text).not.toContain("\u001b[");
+    expect(text).toContain("code=agent_hostile");
+    expect(text).toContain("code=read_hostile");
+    expect(text).toContain("... [truncated]");
+    expect(text).not.toContain("x".repeat(600));
+    expect(text).not.toContain("y".repeat(600));
+    expect(result.details).toMatchObject({
+      primaryError: { message: primaryMessage },
+      diagnostic: { status: "failed", error: { message: secondaryMessage } },
+    });
+  });
+
+  test("agent.prompt distinguishes submission uncertainty and never submits twice", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, resultForMethod(request.method)));
+      } else if (request.method === "agent.prompt") {
+        socket.end(failure(request, "agent_prompt_failed", "acceptance unknown"));
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Do it once." },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      stage: "submit",
+      primaryError: { code: "agent_prompt_failed" },
+      resolvedIdentity: { paneId: "w1:p1", terminalId: "term-1" },
+      submission: { state: "uncertain" },
+    });
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("Failed stage: submit.");
+    expect(text).toContain("operation=agent.prompt");
+    expect(text).toContain("code=agent_prompt_failed");
+    expect(text).toContain("Stable pane: w1:p1 (terminal term-1)");
+    expect(text).toContain("Submission state: uncertain.");
+    expect(text).toContain("Do not resend blindly");
+    expect(() => structuredClone(result.details)).not.toThrow();
+    expect(server.requests.filter((request) => request.method === "agent.prompt")).toHaveLength(1);
+  });
+
+  test("agent.prompt abort keeps known identity and performs no diagnostic I/O", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+      // Hold agent.prompt until the caller aborts its exact socket.
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+    const controller = new AbortController();
+    const running = agent.execute(
+      "call-1",
+      { action: "prompt", target: "worker", prompt: "Do it once." },
+      controller.signal,
+      undefined,
+      context(),
+    );
+    while (!server.requests.some((request) => request.method === "agent.prompt")) {
+      await sleep(1);
+    }
+    controller.abort();
+
+    const result = await running;
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      stage: "submit",
+      primaryError: { tag: "AbortError" },
+      resolvedIdentity: { paneId: "w1:p1" },
+      submission: { state: "uncertain" },
+      diagnostic: { status: "skipped", reason: "aborted" },
+    });
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.get",
+      "agent.prompt",
+    ]);
+  });
+
+  test("overview scopes by caller, filters watches before display caps, and reports omissions", async () => {
+    const panes = Array.from({ length: 70 }, (_, index) =>
+      paneInfo({
+        pane_id: `w1:p${index + 1}`,
+        terminal_id: `term-${index + 1}`,
+        focused: index === 0,
+      }),
+    );
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "pane.wait_for_output") return;
+      if (request.method === "pane.current") {
+        socket.end(success(request, { type: "pane_current", pane: panes[0] }));
+      } else if (request.method === "pane.list") {
+        socket.end(
+          success(request, {
+            type: "pane_list",
+            panes: [...panes, paneInfo({ pane_id: "w2:p1", workspace_id: "w2" })],
+          }),
+        );
+      } else if (request.method === "agent.list") {
+        socket.end(
+          success(request, {
+            type: "agent_list",
+            agents: [
+              agentInfo({ name: "last-worker", pane_id: "w1:p70", terminal_id: "term-70" }),
+              agentInfo({ name: "other", pane_id: "w2:p1", workspace_id: "w2" }),
+            ],
+          }),
+        );
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const { tools, handlers } = harness();
+    const watch = tools.get("herdr_watch");
+    const layout = tools.get("herdr_layout");
+    if (!watch || !layout) throw new Error("required tools missing");
+    await watch.execute(
+      "watch-call",
+      { action: "start", kind: "pane_output", pane: "w1:p70", match: "DONE", wake: "silent" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    try {
+      const result = await layout.execute(
+        "overview-call",
+        { action: "overview" },
+        undefined,
+        undefined,
+        context(),
+      );
+      expect(result.details).toMatchObject({
+        ok: true,
+        scope: { workspaceId: "w1", source: "caller_current" },
+        current: { pane_id: "w1:p1", workspace_id: "w1" },
+        currentInScope: true,
+        activeWatches: [{ pane: "w1:p70" }],
+        truncation: {
+          panes: { total: 70, returned: 64, omitted: 6 },
+          agents: { total: 1, returned: 1, omitted: 0 },
+          activeWatches: { total: 1, returned: 1, omitted: 0 },
+        },
+      });
+      const details = result.details as { panes: Array<{ pane_id: string }> };
+      expect(details.panes).toHaveLength(64);
+      expect(details.panes.some((pane) => pane.pane_id === "w1:p70")).toBe(false);
+      expect(server.requests).toContainEqual(
+        expect.objectContaining({
+          method: "pane.current",
+          params: { caller_pane_id: "w1:p1" },
+        }),
+      );
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
+  test("overview keeps an explicit workspace when caller lookup fails and exposes partial failures", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "pane.current") {
+        socket.end(failure(request, "caller_not_found", "caller pane disappeared"));
+      } else if (request.method === "pane.list") {
+        socket.end(
+          success(request, {
+            type: "pane_list",
+            panes: [paneInfo({ pane_id: "w2:p1", workspace_id: "w2" })],
+          }),
+        );
+      } else if (request.method === "agent.list") {
+        socket.end(success(request, { type: "agent_list", agents: [] }));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    process.env.HERDR_PANE_ID = "gone";
+    const layout = harness().tools.get("herdr_layout");
+    if (!layout) throw new Error("herdr_layout missing");
+
+    const result = await layout.execute(
+      "overview-call",
+      { action: "overview", workspace: "w2" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.details).toMatchObject({
+      ok: true,
+      scope: { workspaceId: "w2", source: "explicit" },
+      current: null,
+      panes: [{ pane_id: "w2:p1", workspace_id: "w2" }],
+      partialFailures: [
+        { part: "current", error: { code: "caller_not_found" } },
+      ],
+    });
+    expect(server.requests.find((request) => request.method === "pane.list")?.params).toEqual({
+      workspace_id: "w2",
+    });
+  });
+
+  test("overview never uses the global focused pane when caller identity is unavailable", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "pane.list") {
+        socket.end(success(request, { type: "pane_list", panes: [] }));
+      } else if (request.method === "agent.list") {
+        socket.end(success(request, { type: "agent_list", agents: [] }));
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    delete process.env.HERDR_PANE_ID;
+    const layout = harness().tools.get("herdr_layout");
+    if (!layout) throw new Error("herdr_layout missing");
+
+    const explicit = await layout.execute(
+      "overview-call",
+      { action: "overview", workspace: "w2" },
+      undefined,
+      undefined,
+      context(),
+    );
+    expect(explicit.details).toMatchObject({
+      ok: true,
+      scope: { workspaceId: "w2", source: "explicit" },
+      current: null,
+      partialFailures: [
+        { part: "current", error: { tag: "CallerIdentityUnavailable" } },
+      ],
+    });
+    expect(server.requests.some((request) => request.method === "pane.current")).toBe(false);
+
+    const implicit = await layout.execute(
+      "overview-call-2",
+      { action: "overview" },
+      undefined,
+      undefined,
+      context(),
+    );
+    expect(implicit.isError).toBe(true);
+    expect(implicit.details).toMatchObject({
+      ok: false,
+      stage: "resolve_scope",
+      primaryError: { tag: "CallerIdentityUnavailable" },
+    });
+    expect(server.requests.some((request) => request.method === "pane.current")).toBe(false);
+  });
+
+  test("overview makes list partial failures explicit without losing successful sections", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "pane.current") {
+        socket.end(success(request, resultForMethod(request.method)));
+      } else if (request.method === "pane.list") {
+        socket.end(failure(request, "pane_list_failed", "panes unavailable"));
+      } else if (request.method === "agent.list") {
+        socket.end(success(request, { type: "agent_list", agents: [agentInfo()] }));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const layout = harness().tools.get("herdr_layout");
+    if (!layout) throw new Error("herdr_layout missing");
+
+    const result = await layout.execute(
+      "overview-call",
+      { action: "overview" },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(result.details).toMatchObject({
+      ok: true,
+      agents: [{ name: "worker" }],
+      partialFailures: [
+        { part: "panes", error: { code: "pane_list_failed" } },
+      ],
+    });
+    expect(result.content[0]?.text).toContain("Partial failures:");
   });
 
   test("session_start records no socket path and opens no Herdr socket", async () => {
