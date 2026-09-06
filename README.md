@@ -46,6 +46,10 @@ There is no public `wait` action or `wait` parameter. `prompt` first resolves th
 
 Actions: `start`, `list`, `status`, `cancel`.
 
+`list` returns active watches only. Add `history: true` to include the retained terminal receipts. `status` still retrieves a finished watch by ID.
+
+Status and wake text include the target, failure code, and observed agent state or terminal match. Terminal evidence prefers the matched line and is limited to 12 lines / 2 KiB, with ANSI controls stripped and truncation marked. Full structured receipts remain in `details`. Read more output only when the excerpt is insufficient; an observed state or matching line does not prove task completion.
+
 Initial kinds:
 
 - `agent_state`

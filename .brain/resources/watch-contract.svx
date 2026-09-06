@@ -20,6 +20,12 @@ Bellwether controls Herdr and observes agent state or pane output. It does not o
 - The separate `wakeSent` flag. `finishWatch` changes status before invoking callbacks, so its terminal guard already prevents a second wake.
 - The duplicated optional watch-input fields and unused actor-input generation. Reuse the two typed start variants; keep generation only on the registry record that checks it.
 
+## Agent-facing receipts
+
+`watchReceiptText` in `src/watch.ts` formats start/status/cancel results and background wakes. It exposes observed agent state and identity, failure codes, or up to 12 lines / 2 KiB of terminal evidence. Prefer the matched line over unrelated terminal history. Strip ANSI controls, mark truncation, and keep terminal text explicitly untrusted. Structured receipts remain intact in `details`.
+
+The public `list` action returns active watches by default. `history: true` includes retained terminal receipts; status-by-ID still works after settlement. This removes routine history output without changing lifecycle, retention, cancellation, or wake delivery.
+
 ## Evidence
 
-`src/watch.ts` keeps immutable watch input separate from machine results. `src/watch.test.ts` checks required variant fields, one terminal notification, cancellation, generation isolation, shutdown, and receipt limits. The public tools and lifecycle transitions are unchanged.
+`src/watch.test.ts` checks required variant fields, one terminal notification, cancellation, generation isolation, shutdown, and receipt limits. `src/watch-receipt.test.ts` checks evidence selection, UTF-8/line bounds, truncation, and failure codes. `src/pi-bellwether.test.ts` checks that status and wake expose the same evidence and terminal history is opt-in.

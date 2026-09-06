@@ -47,6 +47,7 @@ import type {
 import {
   createWatchRegistry,
   MAX_WATCH_TIMEOUT_MS,
+  watchReceiptText,
   type AgentStatus,
   type ReadSource,
   type StartWatchParams,
@@ -204,6 +205,7 @@ export const herdrAgentParameters = Type.Object(
 export const herdrWatchParameters = Type.Object(
   {
     action: StringEnum(Action.watch),
+    history: Type.Optional(Type.Boolean({ description: "For list: include retained terminal watches. Defaults to false (active only)." })),
     kind: Type.Optional(StringEnum(["agent_state", "pane_output"] as const)),
     id: Type.Optional(Type.String()),
     label: Type.Optional(Type.String({ maxLength: 120 })),
@@ -566,17 +568,6 @@ function toStartWatchParams(params: {
     };
   }
   throw new Error("kind is required for action=start");
-}
-
-function watchReceiptText(receipt: WatchReceipt): string {
-  return [
-    `Bellwether watch ${receipt.id}: ${receipt.status}`,
-    `Kind: ${receipt.kind}`,
-    `Label: ${receipt.label}`,
-    receipt.failure ? `Failure: ${receipt.failure}` : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n");
 }
 
 const WATCH_WIDGET_ID = "bellwether-watch-liveness";
@@ -1234,7 +1225,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_watch",
     label: "Herdr Watch",
     description:
-      "Start, list, inspect, or cancel session-owned Herdr watches. Each watch owns one direct Herdr wait socket and an XState lifecycle. Start returns a running receipt immediately. timeoutSeconds uses seconds. Kinds are agent_state and pane_output.",
+      "Start, list, inspect, or cancel session-owned Herdr watches. Start returns immediately; timeoutSeconds uses seconds. List shows active watches; history=true includes retained terminal watches. Status and wakes include observed agent state or up to 12 lines/2KB of terminal evidence. Kinds are agent_state and pane_output.",
     promptSnippet: "Start or inspect a non-blocking direct-socket Herdr watch",
     parameters: herdrWatchParameters,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -1257,12 +1248,12 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           ctx,
         );
         return toolText(
-          `Started ${receipt.kind} watch ${receipt.id} (${receipt.label}) without blocking this turn.`,
+          `Started without blocking this turn.\n${watchReceiptText(receipt)}`,
           receipt,
         );
       }
       if (params.action === "list") {
-        const receipts = watches.list();
+        const receipts = params.history ? watches.list() : watches.active();
         return toolText(
           receipts.length
             ? receipts
@@ -1271,7 +1262,9 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
                     `${receipt.id}\t${receipt.status}\t${receipt.kind}\t${receipt.label}`,
                 )
                 .join("\n")
-            : "No Herdr watches owned by this Pi session.",
+            : params.history
+              ? "No Herdr watches owned by this Pi session."
+              : "No active Herdr watches. Use history=true to include retained terminal watches.",
           { watches: receipts },
         );
       }

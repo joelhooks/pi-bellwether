@@ -314,6 +314,55 @@ describe("Bellwether public surface", () => {
     await handlers.get("session_shutdown")?.();
   });
 
+  test("lists active watches by default and shares evidence between status and wake", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.params.pane_id === "w1:p1") {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages } = harness();
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+    const run = (params: Record<string, unknown>) =>
+      watch.execute("watch-call", params, undefined, undefined, context());
+
+    try {
+      const started = await run({
+        action: "start", kind: "pane_output", pane: "w1:p1", match: "DONE", label: "finished worker",
+      });
+      const details = started.details;
+      if (typeof details !== "object" || details === null || !("id" in details) || typeof details.id !== "string") {
+        throw new Error("missing watch ID");
+      }
+      await vi.waitFor(() => expect(messages).toHaveLength(1));
+      const status = await run({ action: "status", id: details.id });
+      expect(status.content[0]?.text).toContain("Matched pane:");
+      expect(status.content[0]?.text).toContain("DONE");
+      expect(messages[0]).toMatchObject({
+        content: expect.stringContaining(status.content[0]?.text ?? "missing receipt"),
+      });
+
+      const empty = await run({ action: "list" });
+      expect(empty.content[0]?.text).toContain("No active Herdr watches");
+      expect(empty.details).toEqual({ watches: [] });
+
+      await run({
+        action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE", label: "active worker",
+      });
+      const active = await run({ action: "list" });
+      expect(active.content[0]?.text).toContain("active worker");
+      expect(active.content[0]?.text).not.toContain("finished worker");
+      const history = await run({ action: "list", history: true });
+      expect(history.content[0]?.text).toContain("active worker");
+      expect(history.content[0]?.text).toContain("finished worker");
+      expect(() => structuredClone(history)).not.toThrow();
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
   test("prompt sends bounded identity and proof-of-life requests and starts no watch", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       socket.end(
@@ -366,7 +415,7 @@ describe("Bellwether public surface", () => {
         },
       }),
     );
-    expect(watches.content[0]?.text).toContain("No Herdr watches");
+    expect(watches.content[0]?.text).toContain("No active Herdr watches");
     expect(() => structuredClone(result.details)).not.toThrow();
     await handlers.get("session_shutdown")?.();
   });
