@@ -15,5 +15,6 @@ Project memory for the Pi ↔ Herdr integration package.
 
 ## Resources
 
+- [Bounded agent controls](./resources/agent-controls.svx)
 - [Extension shape](./resources/pi-bellwether-extension-shape.svx)
 - [Watch contract and deletion boundaries](./resources/watch-contract.svx)

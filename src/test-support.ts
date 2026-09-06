@@ -203,6 +203,7 @@ export function resultForMethod(method: string): Record<string, unknown> {
         root_pane: paneInfo(),
       };
     case "workspace.focus":
+    case "workspace.rename":
       return { type: "workspace_info", workspace: workspaceInfo() };
     case "tab.list":
       return { type: "tab_list", tabs: [tabInfo()] };
@@ -215,6 +216,7 @@ export function resultForMethod(method: string): Record<string, unknown> {
     case "pane.current":
       return { type: "pane_current", pane: paneInfo() };
     case "pane.get":
+    case "pane.rename":
     case "pane.split":
       return { type: "pane_info", pane: paneInfo() };
     case "pane.layout":

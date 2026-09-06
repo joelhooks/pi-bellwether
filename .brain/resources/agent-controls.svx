@@ -1,0 +1,29 @@
+---
+title: "Bounded agent controls"
+status: "implemented"
+privacy: "public"
+---
+
+# Bounded agent controls
+
+Bellwether exposes stateless Herdr controls. It does not add a launch actor, retry loop, socket pool, or workflow lifecycle.
+
+## Startup and prompt truth
+
+A successful direct `agent.start` response proves interactive readiness only when Herdr reports `interactive_ready: true`. Bellwether otherwise reports readiness as `unknown` and preserves Herdr's launch, state, and identity fields.
+
+`herdr_agent prompt` submits once. A failure receipt separates resolution, submission, and proof-of-life stages. Submission is `not_submitted`, `uncertain`, or `submitted`. Proof recovery may call `agent.wait` inside the original 30-second deadline, but it never resubmits the prompt.
+
+Start and prompt failures keep a cloneable primary error and set the final tool result error flag. When a pane is known, Bellwether makes at most one best-effort `pane.read` request with a 1.5-second client deadline. It strips ANSI, limits evidence to 12 lines / 2 KiB, and marks it `UNTRUSTED`. Diagnostic failure never replaces the primary error. Abort starts no diagnostic request.
+
+## Naming
+
+- `herdr_layout workspace_rename` sends an explicit workspace ID and label.
+- `herdr_pane rename` sends an explicit pane ID and label, or clears the label explicitly.
+- `herdr_agent rename` remains separate because agent identity and pane display labels are different contracts.
+
+## Overview
+
+`herdr_layout overview` returns one read-only snapshot for an explicit workspace or the caller's current workspace. It includes caller identity, workspace-scoped panes and agents, and active session-owned watches tied to the full scoped pane and agent set.
+
+Each displayed section is capped at 64 records and reports total, returned, and omitted counts. Watch filtering happens before those display caps. Partial request failures stay visible. An explicit workspace never falls back to a globally focused workspace, and overview reads no terminal output.

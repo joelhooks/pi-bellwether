@@ -23,14 +23,18 @@ Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only 
 
 Actions:
 
-- `current`
-- `workspace_list`, `workspace_create`, `workspace_focus`
+- `current`, `overview`
+- `workspace_list`, `workspace_create`, `workspace_focus`, `workspace_rename`
 - `tab_list`, `tab_create`, `tab_focus`
 - `pane_list`, `pane_layout`, `pane_split`
 
+`overview` returns one bounded snapshot for an explicit workspace or the caller's current workspace. It includes caller identity, scoped panes and agents, and session-owned active watches tied to those panes. Each list returns at most 64 entries with total, returned, and omitted counts. A failed section appears in `partialFailures`; Bellwether never substitutes a globally focused workspace for a missing caller.
+
 ### `herdr_pane`
 
-Actions: `get`, `run`, `read`, `send_text`, `send_keys`, `close`.
+Actions: `get`, `rename`, `run`, `read`, `send_text`, `send_keys`, `close`.
+
+`rename` changes the pane display label. Pass `clearLabel: true` to clear it. Agent identity naming remains a separate `herdr_agent rename` action.
 
 There is no `wait_output` action. `close` requires `confirm: true` and refuses the pane that hosts the current Pi process.
 
@@ -38,9 +42,11 @@ There is no `wait_output` action. `close` requires `confirm: true` and refuses t
 
 Actions: `list`, `get`, `start`, `prompt`, `read`, `send_keys`, `focus`, `rename`.
 
-Agent startup uses `timeoutSeconds`; `120` means two minutes. There is no ambiguous public `timeout` field.
+Agent startup uses `timeoutSeconds`; `120` means two minutes. There is no ambiguous public `timeout` field. Herdr's direct `agent.start` response may confirm `interactive_ready: true`; only then does Bellwether report readiness as `proven`. Otherwise it reports the launch as submitted with readiness `unknown`, preserving `launch_pending`, `interactive_ready`, agent state, and stable identity in details.
 
 There is no public `wait` action or `wait` parameter. `prompt` first resolves the target to its stable pane ID, then performs a bounded delivery handshake. Bellwether asks Herdr for `working` state with one absolute 30-second wall-clock deadline. A successful response is proof that Herdr observed the agent alive and working. If the target is already working, Bellwether submits atomically without asking Herdr to wait for a later turn transition; the prompt response must still report working. This avoids a false timeout while a long current turn queues the prompt. Herdr 0.7.5 can return `agent_prompt_stalled` after five seconds even when Pi starts working just after its fixed gate. Bellwether then spends only the unused part of the original 30-second deadline on `agent.wait`, without resubmitting the prompt. If neither path observes `working`, the call returns a timeout. It does not wait for completion and starts no watch.
+
+Start and prompt failures return `isError: true` with cloneable details: the primary Herdr error, failed stage, known pane identity, and prompt submission state. Bellwether makes at most one extra `pane.read` diagnostic request with a 1.5-second client deadline. Evidence is ANSI-stripped and capped at 12 lines / 2 KiB. Terminal evidence is marked `UNTRUSTED`; a diagnostic failure never replaces the primary error. An aborted call performs no further diagnostic I/O.
 
 ### `herdr_watch`
 
