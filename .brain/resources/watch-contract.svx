@@ -1,0 +1,25 @@
+---
+title: "Watch contract and deletion boundaries"
+status: "implemented"
+privacy: "public"
+---
+
+# Watch contract and deletion boundaries
+
+Bellwether controls Herdr and observes agent state or pane output. It does not own workflow claims, leases, or completion decisions.
+
+## Keep
+
+- The existing XState lifecycle: starting → running → matched, timedOut, targetGone, failed, or cancelled.
+- Exact socket cancellation, dead-agent probes, bounded terminal receipts, and session-generation wake suppression.
+- Guarded pane close. Both the tool and slash command refuse the pane hosting Pi. Closing a pane is not a graceful agent stop.
+
+## Delete
+
+- The unused workflow-watch adapter types. No in-repo caller or workflow result contract justified them.
+- The separate `wakeSent` flag. `finishWatch` changes status before invoking callbacks, so its terminal guard already prevents a second wake.
+- The duplicated optional watch-input fields and unused actor-input generation. Reuse the two typed start variants; keep generation only on the registry record that checks it.
+
+## Evidence
+
+`src/watch.ts` keeps immutable watch input separate from machine results. `src/watch.test.ts` checks required variant fields, one terminal notification, cancellation, generation isolation, shutdown, and receipt limits. The public tools and lifecycle transitions are unchanged.

@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, test } from "vitest";
 
 import { createHerdrClient } from "./herdr-client.ts";
 import type { HerdrClient } from "./herdr-client.ts";
@@ -9,6 +9,8 @@ import {
   MAX_ACTIVE_WATCHES,
   MAX_TERMINAL_WATCHES,
   MAX_WATCH_TIMEOUT_MS,
+  type StartWatchParams,
+  type WatchInput,
   type WatchReceipt,
 } from "./watch.ts";
 import { HerdrApiError } from "./herdr-client.ts";
@@ -57,6 +59,14 @@ async function waitForTerminal(
 }
 
 describe("Herdr watch XState lifecycle", () => {
+  test("watch kinds retain their required fields inside the actor", () => {
+    expectTypeOf<WatchInput>().toExtend<StartWatchParams>();
+    expectTypeOf<Extract<WatchInput, { kind: "agent_state" }>>()
+      .toExtend<{ target: string }>();
+    expectTypeOf<Extract<WatchInput, { kind: "pane_output" }>>()
+      .toExtend<{ pane: string; match: string }>();
+  });
+
   test("moves starting to running and wakes exactly once on match", async () => {
     const server = await startFakeHerdrServer(async (request, socket) => {
       await sleep(10);
@@ -75,7 +85,8 @@ describe("Herdr watch XState lifecycle", () => {
     });
     servers.push(server);
     const messages: unknown[] = [];
-    const registry = registryFor(server, messages);
+    const lifecycle: Array<{ lifecycle: string; receipt: WatchReceipt }> = [];
+    const registry = registryFor(server, messages, lifecycle);
 
     const started = registry.start(
       { kind: "agent_state", target: "worker", wake: "agent" },
@@ -91,6 +102,9 @@ describe("Herdr watch XState lifecycle", () => {
 
     const terminal = await waitForTerminal(() => registry.status(started.id));
     expect(terminal.status).toBe("matched");
+    expect(messages).toHaveLength(1);
+    expect(lifecycle.filter((event) => event.lifecycle === "settled")).toHaveLength(1);
+    expect(registry.cancel(started.id)).toEqual(terminal);
     expect(messages).toHaveLength(1);
     expect(() => structuredClone(terminal)).not.toThrow();
     await registry.shutdown();
@@ -296,6 +310,26 @@ describe("Herdr watch XState lifecycle", () => {
         { mode: "tui" },
       ),
     ).toThrow(`at most ${MAX_WATCH_TIMEOUT_MS}ms`);
+    await registry.shutdown();
+  });
+
+  test("generation changes suppress old wakes without suppressing new watches", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    const messages: unknown[] = [];
+    const registry = registryFor(server, messages);
+    const params = { kind: "pane_output", pane: "w1:p1", match: "DONE" } as const;
+
+    const oldWatch = registry.start(params, { mode: "tui" });
+    registry.bumpGeneration();
+    expect((await waitForTerminal(() => registry.status(oldWatch.id))).status).toBe("matched");
+    expect(messages).toHaveLength(0);
+
+    const newWatch = registry.start(params, { mode: "tui" });
+    expect((await waitForTerminal(() => registry.status(newWatch.id))).status).toBe("matched");
+    expect(messages).toHaveLength(1);
     await registry.shutdown();
   });
 
