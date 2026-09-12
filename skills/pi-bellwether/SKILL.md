@@ -53,6 +53,8 @@ Wake policies:
 
 Agent-state watches re-probe `agent.get` every five seconds. If a worker crashes back to a live shell without a Herdr release event, the watch settles as `targetGone` and wakes according to policy. A lifecycle match is diagnostic. It does not prove a worker finished its task.
 
+Active direct watches and degraded ping waits survive `/reload`. Bellwether suspends them into the current Pi branch, closes the old sockets or child processes, and restores them with the same IDs and original absolute deadlines. It restores only on `reason: "reload"`; new, resumed, and forked sessions do not revive old waits.
+
 ## Close guard
 
 Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and refuses the pane that hosts Pi.

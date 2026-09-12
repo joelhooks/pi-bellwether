@@ -106,6 +106,7 @@ export interface WatchReceipt {
 interface WatchRecord {
   readonly actor: AnyActorRef;
   readonly completion: Promise<void>;
+  readonly expiresAt?: number;
   readonly generation: number;
   readonly input: WatchInput;
   subscription?: { unsubscribe(): void };
@@ -361,6 +362,11 @@ export interface WatchToolContext {
   readonly mode?: string;
 }
 
+export interface SuspendedWatch {
+  readonly expiresAt?: number;
+  readonly input: WatchInput;
+}
+
 export function createWatchRegistry(options: WatchRegistryOptions) {
   const activeRecords = new Map<string, WatchRecord>();
   const terminalReceipts = new Map<string, WatchReceipt>();
@@ -590,7 +596,55 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     throw new Error(`unknown Herdr watch: ${id}`);
   };
 
+  const runInput = (
+    input: WatchInput,
+    expiresAt: number | undefined,
+    entryType: "bellwether-herdr-watch-started" | "bellwether-herdr-watch-resumed",
+  ): WatchReceipt => {
+    const actor = createActor(machine, { input });
+    let resolveCompletion: () => void = () => {};
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const record: WatchRecord = {
+      actor,
+      completion,
+      expiresAt,
+      generation,
+      input,
+      status: "running",
+    };
+    activeRecords.set(input.id, record);
+    record.subscription = actor.subscribe({
+      error(error) {
+        if (record.status === "running") {
+          finishWatch(
+            record,
+            "failed",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        resolveCompletion();
+      },
+      next(snapshot) {
+        const status = terminalStatus(snapshot.value);
+        if (snapshot.status === "done" && status) {
+          finishWatch(record, status);
+          resolveCompletion();
+        }
+      },
+    });
+    actor.start();
+    const receipt = toReceipt(record);
+    options.appendEntry?.(entryType, receipt);
+    options.onLifecycle?.("started", receipt);
+    return receipt;
+  };
+
   return {
+    resumeSession() {
+      shuttingDown = false;
+    },
     bumpGeneration() {
       generation += 1;
     },
@@ -617,6 +671,35 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
           (record) => record.subscription !== undefined,
         ).length,
       };
+    },
+    suspend(): SuspendedWatch[] {
+      return activeWatches().map((record) => ({
+        expiresAt: record.expiresAt,
+        input: record.input,
+      }));
+    },
+    restore(suspended: SuspendedWatch, ctx: WatchToolContext): WatchReceipt {
+      if (ctx.mode === "print" || ctx.mode === "json") {
+        throw new Error("herdr_watch requires a long-lived interactive or RPC Pi process");
+      }
+      if (activeWatches().length >= MAX_ACTIVE_WATCHES) {
+        throw new Error(`herdr_watch allows at most ${MAX_ACTIVE_WATCHES} active watches`);
+      }
+      if (activeRecords.has(suspended.input.id)) {
+        return receiptFor(suspended.input.id);
+      }
+      const timeoutMs =
+        suspended.expiresAt === undefined
+          ? undefined
+          : Math.min(
+              MAX_WATCH_TIMEOUT_MS,
+              Math.max(1, suspended.expiresAt - now()),
+            );
+      return runInput(
+        { ...suspended.input, timeoutMs },
+        suspended.expiresAt,
+        "bellwether-herdr-watch-resumed",
+      );
     },
     async shutdown() {
       shuttingDown = true;
@@ -653,51 +736,20 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         throw new Error("pane and match are required for pane_output");
       }
 
+      const startedAt = now();
       const id = (options.createId ?? (() => randomUUID().slice(0, 8)))();
       const input: WatchInput = {
         ...params,
         id,
         label: defaultLabel(params),
-        startedAt: now(),
+        startedAt,
         wake: params.wake ?? "agent",
       };
-      const actor = createActor(machine, { input });
-      let resolveCompletion: () => void = () => {};
-      const completion = new Promise<void>((resolve) => {
-        resolveCompletion = resolve;
-      });
-      const record: WatchRecord = {
-        actor,
-        completion,
-        generation,
+      return runInput(
         input,
-        status: "running",
-      };
-      activeRecords.set(id, record);
-      record.subscription = actor.subscribe({
-        error(error) {
-          if (record.status === "running") {
-            finishWatch(
-              record,
-              "failed",
-              error instanceof Error ? error.message : String(error),
-            );
-          }
-          resolveCompletion();
-        },
-        next(snapshot) {
-          const status = terminalStatus(snapshot.value);
-          if (snapshot.status === "done" && status) {
-            finishWatch(record, status);
-            resolveCompletion();
-          }
-        },
-      });
-      actor.start();
-      const receipt = toReceipt(record);
-      options.appendEntry?.("bellwether-herdr-watch-started", receipt);
-      options.onLifecycle?.("started", receipt);
-      return receipt;
+        params.timeoutMs === undefined ? undefined : startedAt + params.timeoutMs,
+        "bellwether-herdr-watch-started",
+      );
     },
     status: receiptFor,
   };

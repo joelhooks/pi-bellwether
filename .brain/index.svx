@@ -12,6 +12,7 @@ Project memory for the Pi ↔ Herdr integration package.
 - [Dead-agent watch liveness](./projects/dead-agent-watch-liveness.svx)
 - [Explicit watch timeout units](./projects/explicit-watch-timeout-units.svx)
 - [Prompt proof of life](./projects/prompt-proof-of-life.svx)
+- [Reload-surviving watches](./projects/reload-surviving-watches.svx)
 
 ## Resources
 

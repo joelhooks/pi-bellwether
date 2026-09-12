@@ -48,6 +48,12 @@ import type {
   PingWaitStatus,
 } from "../src/ping-wait.ts";
 import {
+  BELLWETHER_SUSPENDED_ENTRY_TYPE,
+  bellwetherSuspensionData,
+  bellwetherSuspensionFrom,
+  type SuspendedPingWait,
+} from "../src/suspension.ts";
+import {
   createWatchRegistry,
   MAX_WATCH_TIMEOUT_MS,
   watchReceiptText,
@@ -986,6 +992,8 @@ export function renderWatchLivenessWidget(
 interface PingWaitRecord {
   readonly actor: ReturnType<typeof createPingWaitActor>;
   readonly controller: AbortController;
+  readonly expiresAt?: number;
+  readonly input: PingWaitInput;
   completion: Promise<void>;
   finishedAt?: number;
   status: PingWaitStatus;
@@ -1068,45 +1076,19 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     );
   };
 
-  const startPingWait = async (
-    params: PingWaitParameters,
-    ctx: ExtensionContext,
+  const runPingWaitInput = async (
+    input: PingWaitInput,
+    expiresAt: number | undefined,
+    entryType: "herdr-ping-wait-started" | "herdr-ping-wait-resumed",
   ): Promise<PingWaitRecord> => {
-    if (ctx.mode === "print" || ctx.mode === "json") {
-      throw new Error("herdr_ping_wait requires a long-lived Pi process");
-    }
-    if (!params.paneIds?.length) throw new Error("paneIds is required for action=start");
-    const active = [...pingWaits.values()].filter((record) => record.status === "running");
-    if (active.length >= MAX_ACTIVE_PING_WAITS) {
-      throw new Error(`herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`);
-    }
-    const sessionId = ctx.sessionManager
-      .getSessionId()
-      .replaceAll(/[^A-Za-z0-9_-]/g, "-");
-    const input: PingWaitInput = {
-      cursorPath: join(
-        homedir(),
-        ".local",
-        "state",
-        "herdr-pings",
-        `pi-bellwether-${sessionId}.cursor.json`,
-      ),
-      id: randomUUID().slice(0, 8),
-      label: params.label?.trim() || params.paneIds.join(", "),
-      paneIds: [...new Set(params.paneIds)],
-      startedAt: Date.now(),
-      timeoutMs:
-        params.timeoutSeconds === undefined
-          ? undefined
-          : params.timeoutSeconds * 1_000,
-      wake: params.wake ?? "agent",
-    };
     const binary = await resolvePingWaitBinary();
     const actor = createPingWaitActor(input);
     const controller = new AbortController();
     const record: PingWaitRecord = {
       actor,
       controller,
+      expiresAt,
+      input,
       completion: Promise.resolve(),
       status: "running",
     };
@@ -1125,8 +1107,70 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           failure: error instanceof Error ? error.message : String(error),
         }),
     );
-    pi.appendEntry("herdr-ping-wait-started", pingReceipt(record));
+    pi.appendEntry(entryType, pingReceipt(record));
     return record;
+  };
+
+  const startPingWait = async (
+    params: PingWaitParameters,
+    ctx: ExtensionContext,
+  ): Promise<PingWaitRecord> => {
+    if (ctx.mode === "print" || ctx.mode === "json") {
+      throw new Error("herdr_ping_wait requires a long-lived Pi process");
+    }
+    if (!params.paneIds?.length) throw new Error("paneIds is required for action=start");
+    const active = [...pingWaits.values()].filter((record) => record.status === "running");
+    if (active.length >= MAX_ACTIVE_PING_WAITS) {
+      throw new Error(`herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`);
+    }
+    const sessionId = ctx.sessionManager
+      .getSessionId()
+      .replaceAll(/[^A-Za-z0-9_-]/g, "-");
+    const startedAt = Date.now();
+    const timeoutMs =
+      params.timeoutSeconds === undefined
+        ? undefined
+        : params.timeoutSeconds * 1_000;
+    const input: PingWaitInput = {
+      cursorPath: join(
+        homedir(),
+        ".local",
+        "state",
+        "herdr-pings",
+        `pi-bellwether-${sessionId}.cursor.json`,
+      ),
+      id: randomUUID().slice(0, 8),
+      label: params.label?.trim() || params.paneIds.join(", "),
+      paneIds: [...new Set(params.paneIds)],
+      startedAt,
+      timeoutMs,
+      wake: params.wake ?? "agent",
+    };
+    return runPingWaitInput(
+      input,
+      timeoutMs === undefined ? undefined : startedAt + timeoutMs,
+      "herdr-ping-wait-started",
+    );
+  };
+
+  const restorePingWait = async (suspended: SuspendedPingWait) => {
+    if (pingWaits.has(suspended.input.id)) return;
+    const active = [...pingWaits.values()].filter((record) => record.status === "running");
+    if (active.length >= MAX_ACTIVE_PING_WAITS) {
+      throw new Error(`herdr_ping_wait allows at most ${MAX_ACTIVE_PING_WAITS} active waits`);
+    }
+    const timeoutMs =
+      suspended.expiresAt === undefined
+        ? undefined
+        : Math.min(
+            MAX_WATCH_TIMEOUT_MS,
+            Math.max(1, suspended.expiresAt - Date.now()),
+          );
+    await runPingWaitInput(
+      { ...suspended.input, timeoutMs },
+      suspended.expiresAt,
+      "herdr-ping-wait-resumed",
+    );
   };
 
   pi.registerTool({
@@ -2130,9 +2174,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", (event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     currentContext = ctx;
     shuttingDown = false;
+    watches.resumeSession();
     if (event.reason !== "startup") watches.bumpGeneration();
     if (ctx.mode === "tui") {
       ctx.ui.setWidget(WATCH_WIDGET_ID, (tui, theme) => {
@@ -2157,6 +2202,38 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         watchWidgetFrame = (watchWidgetFrame + 1) % WATCH_WIDGET_FRAMES.length;
         requestWatchWidgetRender();
       }, WATCH_WIDGET_INTERVAL_MS);
+    }
+    if (event.reason === "reload") {
+      const suspended = bellwetherSuspensionFrom(ctx.sessionManager.getBranch());
+      let resumed = 0;
+      for (const watch of suspended.watches) {
+        try {
+          watches.restore(watch, ctx);
+          resumed += 1;
+        } catch (error) {
+          ctx.ui.notify(
+            `Bellwether could not resume watch ${watch.input.id}: ${error instanceof Error ? error.message : String(error)}`,
+            "warning",
+          );
+        }
+      }
+      for (const pingWait of suspended.pingWaits) {
+        try {
+          await restorePingWait(pingWait);
+          resumed += 1;
+        } catch (error) {
+          ctx.ui.notify(
+            `Bellwether could not resume degraded wait ${pingWait.input.id}: ${error instanceof Error ? error.message : String(error)}`,
+            "warning",
+          );
+        }
+      }
+      if (resumed > 0) {
+        ctx.ui.notify(
+          `Bellwether resumed ${resumed} wait${resumed === 1 ? "" : "s"} after reload`,
+          "info",
+        );
+      }
     }
     if (!coordination) {
       coordination = createIntercomCoordination({
@@ -2207,7 +2284,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     });
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     shuttingDown = true;
     if (watchWidgetTimer) clearInterval(watchWidgetTimer);
     watchWidgetTimer = undefined;
@@ -2215,11 +2292,24 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     watchWidgetTui = undefined;
     coordination?.dispose();
     coordination = undefined;
-    await watches.shutdown();
 
     const activePingWaits = [...pingWaits.values()].filter(
       (record) => record.status === "running",
     );
+    if (event?.reason === "reload") {
+      pi.appendEntry(
+        BELLWETHER_SUSPENDED_ENTRY_TYPE,
+        bellwetherSuspensionData(
+          watches.suspend(),
+          activePingWaits.map((record) => ({
+            expiresAt: record.expiresAt,
+            input: record.input,
+          })),
+          Date.now(),
+        ),
+      );
+    }
+    await watches.shutdown();
     for (const record of activePingWaits) {
       record.actor.send({ type: "CANCEL" });
       record.controller.abort();

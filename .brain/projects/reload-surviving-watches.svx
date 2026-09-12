@@ -1,0 +1,39 @@
+---
+title: "Reload-surviving watches"
+type: "project"
+status: "active"
+created_at: "2026-09-12"
+privacy: "private"
+tags:
+  - bellwether
+  - herdr
+  - xstate
+  - reload
+---
+
+# Reload-surviving watches
+
+## Decision
+
+Active `herdr_watch` actors and degraded `herdr_ping_wait` child processes survive Pi `/reload` without keeping old runtime resources alive.
+
+On `session_shutdown` with `reason: "reload"`, Bellwether appends one versioned suspension entry to the current Pi branch. The entry carries the complete serializable watch input and its absolute expiry. Bellwether then cancels the old XState actors, closes their exact sockets, aborts fallback children, and drains completion.
+
+On `session_start` with `reason: "reload"`, the replacement extension instance reads only the newest suspension entry and starts fresh actors with the same IDs. It computes the remaining timeout from the original absolute expiry, so repeated reloads cannot extend a deadline. New, resumed, and forked sessions restore nothing.
+
+An empty newest entry prevents an older suspension from winning. A malformed newest entry also restores nothing. Failing closed is safer than reviving stale wake policy.
+
+## State boundary
+
+Reload is suspension, not a new watch state. Each runtime actor still follows:
+
+```text
+starting -> running -> matched | timedOut | targetGone | failed | cancelled
+```
+
+The old actor ends as `cancelled` while shutdown suppresses its wake. The replacement actor begins from the persisted input. Durable suspension owns continuity; XState owns one runtime generation.
+
+## Regression boundary
+
+- `src/suspension.test.ts` checks versioned round trips and newest-entry authority.
+- `src/pi-bellwether.test.ts` runs direct and degraded waits across simulated reloads, verifies stable IDs, and checks that the resumed direct timeout is smaller than the original deadline.

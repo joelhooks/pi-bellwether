@@ -70,7 +70,7 @@ class EventBus {
   }
 }
 
-function harness() {
+function harness(branch: unknown[] = []) {
   const tools = new Map<string, TestTool>();
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const messages: unknown[] = [];
@@ -79,6 +79,7 @@ function harness() {
   const apiDouble = {
     appendEntry(type: string, data: unknown) {
       entries.push({ type, data });
+      branch.push({ type: "custom", customType: type, data });
     },
     events,
     on(event: string, handler: (...args: unknown[]) => unknown) {
@@ -97,12 +98,15 @@ function harness() {
   return { tools, handlers, messages, entries, events };
 }
 
-function context() {
+function context(branch: unknown[] = [], notifications: string[] = []) {
   return {
     mode: "tui",
-    sessionManager: { getSessionId: () => "test-session" },
+    sessionManager: {
+      getBranch: () => branch,
+      getSessionId: () => "test-session",
+    },
     ui: {
-      notify() {},
+      notify(message: string) { notifications.push(message); },
       editor: async () => undefined,
       confirm: async () => true,
       setWidget() {},
@@ -110,7 +114,7 @@ function context() {
   };
 }
 
-async function waiterExecutable(): Promise<string> {
+async function waiterExecutable(delayMs = 250): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "pi-bellwether-extension-"));
   temporaryDirectories.push(directory);
   const path = join(directory, "waiter.js");
@@ -119,7 +123,7 @@ async function waiterExecutable(): Promise<string> {
     `#!/usr/bin/env node
 setTimeout(() => {
   process.stdout.write(JSON.stringify({ type: "turn_ended", pane_id: "w1:p1" }) + "\\n");
-}, 250);
+}, ${delayMs});
 `,
     "utf8",
   );
@@ -380,6 +384,63 @@ describe("Bellwether public surface", () => {
     } finally {
       await handlers.get("session_shutdown")?.();
     }
+  });
+
+  test("suspends a direct watch on reload and resumes it once", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (server.requests.length >= 2) {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const branch: unknown[] = [];
+    const first = harness(branch);
+    const firstContext = context(branch);
+    await first.handlers.get("session_start")?.({ reason: "startup" }, firstContext);
+    const firstWatch = first.tools.get("herdr_watch");
+    if (!firstWatch) throw new Error("herdr_watch missing");
+
+    const started = await firstWatch.execute(
+      "call-1",
+      {
+        action: "start",
+        kind: "pane_output",
+        pane: "w1:p1",
+        match: "DONE",
+        timeoutSeconds: 60,
+      },
+      undefined,
+      undefined,
+      firstContext,
+    );
+    await vi.waitFor(() => expect(server.requests).toHaveLength(1));
+    await first.handlers.get("session_shutdown")?.({ reason: "reload" });
+
+    const notifications: string[] = [];
+    const second = harness(branch);
+    const secondContext = context(branch, notifications);
+    await second.handlers.get("session_start")?.({ reason: "reload" }, secondContext);
+    await vi.waitFor(() => expect(server.requests).toHaveLength(2));
+    await vi.waitFor(() => expect(second.messages).toHaveLength(1));
+
+    expect(server.requests[1]).toMatchObject({
+      method: "pane.wait_for_output",
+      params: {
+        pane_id: "w1:p1",
+        timeout_ms: expect.any(Number),
+      },
+    });
+    expect((server.requests[1]?.params.timeout_ms as number)).toBeLessThan(60_000);
+    expect(second.messages[0]).toMatchObject({
+      customType: "bellwether-herdr-watch",
+      details: {
+        id: (started.details as { id: string }).id,
+        status: "matched",
+      },
+    });
+    expect(notifications).toContain("Bellwether resumed 1 wait after reload");
+    await second.handlers.get("session_shutdown")?.({ reason: "quit" });
   });
 
   test("prompt sends bounded identity and proof-of-life requests and starts no watch", async () => {
@@ -1695,4 +1756,40 @@ test("herdr_ping_wait remains an explicit degraded fallback", async () => {
   while (messages.length === 0 && Date.now() < deadline) await sleep(20);
   expect(messages).toHaveLength(1);
   await handlers.get("session_shutdown")?.();
+});
+
+test("herdr_ping_wait survives reload without extending its deadline", async () => {
+  process.env.HERDR_PING_WAIT_BIN = await waiterExecutable(1_000);
+  const branch: unknown[] = [];
+  const first = harness(branch);
+  const firstContext = context(branch);
+  await first.handlers.get("session_start")?.({ reason: "startup" }, firstContext);
+  const firstTool = first.tools.get("herdr_ping_wait");
+  if (!firstTool) throw new Error("herdr_ping_wait was not registered");
+  const started = await firstTool.execute(
+    "call-1",
+    { action: "start", paneIds: ["w1:p1"], timeoutSeconds: 60 },
+    undefined,
+    undefined,
+    firstContext,
+  );
+  await first.handlers.get("session_shutdown")?.({ reason: "reload" });
+
+  const notifications: string[] = [];
+  const second = harness(branch);
+  await second.handlers.get("session_start")?.(
+    { reason: "reload" },
+    context(branch, notifications),
+  );
+  await vi.waitFor(() => expect(second.messages).toHaveLength(1), { timeout: 2_000 });
+
+  expect(second.messages[0]).toMatchObject({
+    customType: "herdr-ping-wait",
+    details: {
+      id: (started.details as { id: string }).id,
+      status: "matched",
+    },
+  });
+  expect(notifications).toContain("Bellwether resumed 1 wait after reload");
+  await second.handlers.get("session_shutdown")?.({ reason: "quit" });
 });

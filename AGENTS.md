@@ -15,7 +15,7 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - Each `herdr_watch` owns one direct wait socket. It never shells out or starts a child process.
 - `herdr_agent prompt` is a bounded delivery handshake. Resolve a stable pane ID, submit once, and require Herdr-observed `working` state within one 30-second proof deadline. A stall recovery may use `agent.wait`; it must never resubmit or wait for completion. The public schema exposes no wait options, and prompt starts no watch.
 - Use Herdr `error.code`. Do not classify errors from message text.
-- Cancel and `session_shutdown` close exact owned sockets and suppress late wakes.
+- Cancel and non-reload `session_shutdown` close exact owned sockets and suppress late wakes. `/reload` first persists active direct and degraded waits into a versioned branch entry, then closes them and restores only in the replacement extension instance without extending deadlines.
 - Tool `details` must remain structured-clone-safe plain data.
 - Keep `herdr_ping_wait` visibly degraded and isolated. Only explicit `action=start` may spawn its child.
 

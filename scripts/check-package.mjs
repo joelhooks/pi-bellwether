@@ -10,6 +10,7 @@ const approved = [
   "src/herdr-client.ts",
   "src/intercom.ts",
   "src/ping-wait.ts",
+  "src/suspension.ts",
   "src/watch.ts",
 ].sort();
 

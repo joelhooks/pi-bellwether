@@ -35,6 +35,7 @@
     "src/herdr-client.ts",
     "src/intercom.ts",
     "src/ping-wait.ts",
+    "src/suspension.ts",
     "src/watch.ts",
     "skills/pi-bellwether/SKILL.md",
     "README.md",

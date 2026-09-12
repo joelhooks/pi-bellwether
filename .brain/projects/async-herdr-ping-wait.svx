@@ -22,7 +22,7 @@ running
   └─ CANCEL  → cancelled
 ```
 
-All terminal states are final. Explicit cancellation and `session_shutdown` abort only child processes owned by this extension instance.
+All terminal states are final. Explicit cancellation and non-reload `session_shutdown` abort only child processes owned by this extension instance. Reload shutdown first persists active input and its absolute expiry, then aborts the old child; the replacement instance starts a fresh child with the same ID and remaining deadline.
 
 ## Sync versus background
 
@@ -46,5 +46,5 @@ A `turn_ended` event means the worker settled. It does not prove the worker comp
 
 - `src/ping-wait.ts` owns the XState v5 lifecycle and child-process adapter.
 - `extensions/pi-bellwether.ts` owns Pi tool state, wake delivery, listing, inspection, cancellation, and shutdown cleanup.
-- `extensions/pi-bellwether.test.ts` proves `start` returns before the event and Pi wakes later.
+- `src/pi-bellwether.test.ts` proves `start` returns before the event, Pi wakes later, and the fallback survives `/reload` without extending its deadline.
 - `src/ping-wait.test.ts` covers match, timeout, boundary parsing, and cancellation.
