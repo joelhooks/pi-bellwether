@@ -550,6 +550,55 @@ describe("Bellwether public surface", () => {
     );
     await handlers.get("session_shutdown")?.();
   });
+
+  test("records only decision-grade intercom signals, never presence chatter", async () => {
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const { handlers, entries, events } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const registration = events.emitted.find(
+      (entry) => entry.event === "intercom:extension-register",
+    )?.payload as { onReady(channel: unknown): void; onEvent(event: unknown): void } | undefined;
+    if (!registration) throw new Error("intercom registration missing");
+    registration.onReady({
+      namespace: "bellwether/herdr/v1",
+      snapshot: () => ({ connected: true, supported: true }),
+      publish() {},
+    });
+    const deliver = (payload: Record<string, unknown>) =>
+      registration.onEvent({ type: "message", fromSessionId: "session-b", payload });
+    const base = { version: 1, sourceSessionId: "session-b" };
+    const watch = {
+      ...base,
+      kind: "watch",
+      watchId: "watch-1",
+      watchKind: "agent_state",
+      status: "running",
+      lifecycle: "reconciled",
+    };
+
+    deliver({ ...base, eventId: "cap-1", kind: "capability", protocol: 1 });
+    deliver({ ...base, eventId: "bind-1", kind: "binding", paneId: "w2:p1" });
+    deliver({ ...watch, eventId: "watch-reconciled" });
+    deliver({ ...watch, eventId: "watch-settled", lifecycle: "settled", status: "matched" });
+    deliver({
+      ...base,
+      eventId: "receipt-1",
+      kind: "workflow_receipt",
+      targetSessionId: "test-session",
+      workflowId: "wf-1",
+      generation: 1,
+      sequence: 1,
+    });
+
+    const signalEntries = entries.filter(
+      (entry) => (entry as { type: string }).type === "bellwether-intercom-signal",
+    ) as { data: { eventId: string } }[];
+    expect(signalEntries.map((entry) => entry.data.eventId)).toEqual([
+      "watch-settled",
+      "receipt-1",
+    ]);
+    await handlers.get("session_shutdown")?.();
+  });
 });
 
 type ExpectedRequest = {

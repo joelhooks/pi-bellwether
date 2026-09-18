@@ -2259,6 +2259,13 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           );
         },
         onSignal: (signal) => {
+          // Presence chatter is not session evidence. Capability and binding
+          // announcements and reconciled-watch replays arrive from every peer on
+          // every reconcile; recording each one grew session files by hundreds
+          // of thousands of entries. Wake hints are already recorded by wake().
+          if (signal.kind === "capability" || signal.kind === "binding") return;
+          if (signal.kind === "wake_hint") return;
+          if (signal.kind === "watch" && signal.lifecycle === "reconciled") return;
           pi.appendEntry("bellwether-intercom-signal", {
             eventId: signal.eventId,
             kind: signal.kind,

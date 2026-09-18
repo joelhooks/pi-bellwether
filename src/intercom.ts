@@ -228,6 +228,13 @@ export function createIntercomCoordination(
   const makeEventId = options.createEventId ?? (() => randomUUID());
   const seen = new Set<string>();
   const seenOrder: string[] = [];
+  // Peers already given a targeted announcement. pi-intercom emits
+  // presence_update on every status or context change of every session, so
+  // announcing on each one made N sessions publish N^2 signals and every peer
+  // record each of them. Announce a peer once; a reconnect broadcasts to
+  // everyone present, so the set survives it. Session ids are unique per Pi
+  // process, so a departed id only returns if that same session rejoins.
+  const announcedPeers = new Set<string>();
   let channel: IntercomExtensionChannel | undefined;
   let disposed = false;
   let registered = false;
@@ -312,11 +319,15 @@ export function createIntercomCoordination(
       typeof event.session.id === "string" &&
       event.session.id !== options.sessionId
     ) {
+      if (announcedPeers.has(event.session.id)) return;
+      announcedPeers.add(event.session.id);
       reconcile(event.session.id);
       return;
     }
     if (event.type === "session_left" && typeof event.sessionId === "string") {
-      reconcile();
+      // A departure changes nothing about this session; the remaining peers
+      // already hold its binding and watches.
+      announcedPeers.delete(event.sessionId);
       return;
     }
     if (event.type !== "message" || typeof event.fromSessionId !== "string") return;
@@ -401,6 +412,7 @@ export function createIntercomCoordination(
       channel = undefined;
       seen.clear();
       seenOrder.splice(0);
+      announcedPeers.clear();
       if (typeof unsubscribe === "function") unsubscribe();
     },
   };

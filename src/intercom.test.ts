@@ -210,7 +210,7 @@ describe("optional pi-intercom extension-bus adapter", () => {
     setupResult.adapter.dispose();
   });
 
-  test("reconciles binding and active watches on join, presence, leave, and reconnect", () => {
+  test("reconciles binding and active watches once per peer and on reconnect", () => {
     let sequence = 0;
     const setupResult = setup({
       activeWatches: () => [watchReceipt()],
@@ -248,7 +248,30 @@ describe("optional pi-intercom extension-bus adapter", () => {
         }),
       );
     }
-    expect(signals.filter((signal) => signal.kind === "watch")).toHaveLength(4);
+    // join b, first presence c, reconnect broadcast. Leave republishes nothing.
+    expect(signals.filter((signal) => signal.kind === "watch")).toHaveLength(3);
+    expect(signals.filter((signal) => signal.kind === "binding")).toHaveLength(3);
+
+    // Repeated presence from a known peer is status chatter, not a new peer.
+    const afterFirstRound = channel.published.length;
+    setupResult.registration?.onEvent({
+      type: "presence_update",
+      session: { id: "session-c", status: "working" },
+    });
+    setupResult.registration?.onEvent({
+      type: "presence_update",
+      session: { id: "session-c", status: "idle" },
+    });
+    setupResult.registration?.onEvent({ type: "session_left", sessionId: "session-c" });
+    expect(channel.published).toHaveLength(afterFirstRound);
+
+    // A peer that left and rejoined is announced again: capability, binding,
+    // and one reconciled watch.
+    setupResult.registration?.onEvent({
+      type: "presence_update",
+      session: { id: "session-c", status: "idle" },
+    });
+    expect(channel.published).toHaveLength(afterFirstRound + 3);
     setupResult.adapter.dispose();
 
     const before = channel.published.length;

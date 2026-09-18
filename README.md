@@ -75,7 +75,8 @@ Bellwether optionally registers `bellwether/herdr/v1` through `pi.events` and pi
 - Traffic contains only capability, pane/session binding, watch lifecycle, targeted wake, and workflow-receipt hints.
 - Traffic contains no prompts, terminal output, transcripts, socket paths, or workflow bodies.
 - Recipients filter target session/pane and deduplicate the newest 256 event IDs.
-- Join, leave, presence, and reconnect events republish bindings and active watch hints.
+- A peer's first join or presence event and every reconnect republish bindings and active watch hints. Repeat presence updates and departures publish nothing, so N sessions do not generate N² traffic.
+- Session files record only decision-grade signals: watch lifecycle transitions and workflow-receipt hints as `bellwether-intercom-signal`, and targeted wakes as `bellwether-intercom-wake-hint`. Capability, binding, and reconciled-watch replays are never recorded.
 - A targeted wake invokes one injected local callback. Pi has no wake-only primitive, so the adapter emits a hidden typed custom follow-up (`bellwether-intercom-wake`) to trigger the turn. This custom message enters Pi context but carries only event, source session, and optional watch IDs.
 - Missing or unsupported pi-intercom leaves local Herdr tools and watches unchanged.
 
