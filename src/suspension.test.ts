@@ -5,6 +5,7 @@ import {
   BELLWETHER_SUSPENDED_ENTRY_TYPE,
   bellwetherSuspensionData,
   bellwetherSuspensionFrom,
+  withoutExpired,
 } from "./suspension.ts";
 import type { SuspendedWatch } from "./watch.ts";
 import type { SuspendedPingWait } from "./suspension.ts";
@@ -46,6 +47,16 @@ const entry = (data: unknown): SessionEntry => ({
 } as SessionEntry);
 
 describe("Bellwether reload suspension", () => {
+  test("withoutExpired keeps unbounded and future waits and counts the rest", () => {
+    const unbounded: SuspendedWatch = { input: { ...watch.input, id: "watch-2" } };
+    const data = bellwetherSuspensionData([watch, unbounded], [pingWait], 20_000);
+    expect(withoutExpired(data, 60_000)).toEqual({ expired: 0, live: data });
+    expect(withoutExpired(data, 70_000)).toEqual({
+      expired: 2,
+      live: { ...data, pingWaits: [], watches: [unbounded] },
+    });
+  });
+
   test("round-trips active direct and degraded waits", () => {
     const data = bellwetherSuspensionData([watch], [pingWait], 20_000);
     expect(bellwetherSuspensionFrom([entry(data)])).toEqual(data);

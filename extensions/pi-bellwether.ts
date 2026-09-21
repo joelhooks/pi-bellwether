@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -48,9 +49,16 @@ import type {
   PingWaitStatus,
 } from "../src/ping-wait.ts";
 import {
+  INTERCOM_SIGNAL_ENTRY_TYPE,
+  countPresenceChatter,
+  presenceChatterWarning,
+} from "../src/chatter.ts";
+import {
   BELLWETHER_SUSPENDED_ENTRY_TYPE,
   bellwetherSuspensionData,
   bellwetherSuspensionFrom,
+  withoutExpired,
+  type BellwetherSuspensionData,
   type SuspendedPingWait,
 } from "../src/suspension.ts";
 import {
@@ -1173,6 +1181,52 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     );
   };
 
+  /**
+   * Restore suspended waits: automatically after `/reload`, or explicitly through
+   * `/herdr-resume` after a process restart. Returns how many were started.
+   */
+  const restoreSuspended = async (
+    suspended: BellwetherSuspensionData,
+    ctx: ExtensionContext,
+    source: "reload" | "command",
+  ): Promise<number> => {
+    const activeWatchIds = new Set(watches.active().map((receipt) => receipt.id));
+    let resumed = 0;
+    for (const watch of suspended.watches) {
+      if (activeWatchIds.has(watch.input.id)) continue;
+      try {
+        watches.restore(watch, ctx);
+        resumed += 1;
+      } catch (error) {
+        ctx.ui.notify(
+          `Bellwether could not resume watch ${watch.input.id}: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
+    }
+    for (const pingWait of suspended.pingWaits) {
+      if (pingWaits.has(pingWait.input.id)) continue;
+      try {
+        await restorePingWait(pingWait);
+        resumed += 1;
+      } catch (error) {
+        ctx.ui.notify(
+          `Bellwether could not resume degraded wait ${pingWait.input.id}: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
+    }
+    if (resumed > 0) {
+      ctx.ui.notify(
+        `Bellwether resumed ${resumed} wait${resumed === 1 ? "" : "s"} ${
+          source === "reload" ? "after reload" : "from the newest suspension entry"
+        }`,
+        "info",
+      );
+    }
+    return resumed;
+  };
+
   pi.registerTool({
     name: "herdr_layout",
     label: "Herdr Layout",
@@ -2142,6 +2196,32 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("herdr-resume", {
+    description:
+      "Resume Herdr waits from the newest Bellwether suspension entry after a process restart; expired waits are skipped",
+    handler: async (_args, ctx) => {
+      currentContext = ctx;
+      const { expired, live } = withoutExpired(
+        bellwetherSuspensionFrom(ctx.sessionManager.getBranch()),
+        Date.now(),
+      );
+      const resumed = await restoreSuspended(live, ctx, "command");
+      if (resumed === 0) {
+        let detail = "";
+        if (expired > 0) detail = ` (${expired} expired)`;
+        else if (live.watches.length + live.pingWaits.length > 0) {
+          detail = " (already handled by this process)";
+        }
+        ctx.ui.notify(`No suspended Bellwether waits to resume${detail}`, "warning");
+        return;
+      }
+      if (expired > 0) {
+        ctx.ui.notify(`Skipped ${expired} expired wait${expired === 1 ? "" : "s"}`, "warning");
+      }
+      requestWatchWidgetRender();
+    },
+  });
+
   pi.registerCommand("herdr-stop", {
     description: "Close a Herdr agent pane after confirmation",
     handler: async (args, ctx) => {
@@ -2204,36 +2284,22 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       }, WATCH_WIDGET_INTERVAL_MS);
     }
     if (event.reason === "reload") {
-      const suspended = bellwetherSuspensionFrom(ctx.sessionManager.getBranch());
-      let resumed = 0;
-      for (const watch of suspended.watches) {
-        try {
-          watches.restore(watch, ctx);
-          resumed += 1;
-        } catch (error) {
-          ctx.ui.notify(
-            `Bellwether could not resume watch ${watch.input.id}: ${error instanceof Error ? error.message : String(error)}`,
-            "warning",
-          );
-        }
-      }
-      for (const pingWait of suspended.pingWaits) {
-        try {
-          await restorePingWait(pingWait);
-          resumed += 1;
-        } catch (error) {
-          ctx.ui.notify(
-            `Bellwether could not resume degraded wait ${pingWait.input.id}: ${error instanceof Error ? error.message : String(error)}`,
-            "warning",
-          );
-        }
-      }
-      if (resumed > 0) {
-        ctx.ui.notify(
-          `Bellwether resumed ${resumed} wait${resumed === 1 ? "" : "s"} after reload`,
-          "info",
-        );
-      }
+      await restoreSuspended(
+        bellwetherSuspensionFrom(ctx.sessionManager.getBranch()),
+        ctx,
+        "reload",
+      );
+    } else {
+      // A reload already walked this branch once; every other start is the
+      // first look at a possibly bloated session file.
+      const warning = presenceChatterWarning(
+        countPresenceChatter(ctx.sessionManager.getBranch()),
+        {
+          scriptPath: fileURLToPath(new URL("../scripts/strip-intercom-chatter.mjs", import.meta.url)),
+          sessionFile: ctx.sessionManager.getSessionFile?.(),
+        },
+      );
+      if (warning) ctx.ui.notify(warning, "warning");
     }
     if (!coordination) {
       coordination = createIntercomCoordination({
@@ -2266,7 +2332,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           if (signal.kind === "capability" || signal.kind === "binding") return;
           if (signal.kind === "wake_hint") return;
           if (signal.kind === "watch" && signal.lifecycle === "reconciled") return;
-          pi.appendEntry("bellwether-intercom-signal", {
+          pi.appendEntry(INTERCOM_SIGNAL_ENTRY_TYPE, {
             eventId: signal.eventId,
             kind: signal.kind,
             sourceSessionId: signal.sourceSessionId,
@@ -2303,7 +2369,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     const activePingWaits = [...pingWaits.values()].filter(
       (record) => record.status === "running",
     );
-    if (event?.reason === "reload") {
+    // `/reload` restores automatically. `quit` leaves the same record behind so
+    // an operator can restart the process against the same session file and
+    // run `/herdr-resume`. Session replacement writes nothing.
+    if (event?.reason === "reload" || event?.reason === "quit") {
       pi.appendEntry(
         BELLWETHER_SUSPENDED_ENTRY_TYPE,
         bellwetherSuspensionData(

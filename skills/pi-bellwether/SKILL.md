@@ -53,7 +53,7 @@ Wake policies:
 
 Agent-state watches re-probe `agent.get` every five seconds. If a worker crashes back to a live shell without a Herdr release event, the watch settles as `targetGone` and wakes according to policy. A lifecycle match is diagnostic. It does not prove a worker finished its task.
 
-Active direct watches and degraded ping waits survive `/reload`. Bellwether suspends them into the current Pi branch, closes the old sockets or child processes, and restores them with the same IDs and original absolute deadlines. It restores only on `reason: "reload"`; new, resumed, and forked sessions do not revive old waits.
+Active direct watches and degraded ping waits survive `/reload`. Bellwether suspends them into the current Pi branch, closes the old sockets or child processes, and restores them with the same IDs and original absolute deadlines. It restores automatically only on `reason: "reload"`; new, resumed, and forked sessions do not revive old waits. `/quit` writes the same suspension entry, and after a process restart against the same session file the operator can run `/herdr-resume` to restore it explicitly (expired and already-active waits are skipped). If a session start warns about pre-fix intercom presence chatter, quit Pi, run the named `strip-intercom-chatter.mjs` script with `--apply`, resume the session, then `/herdr-resume` and `/until-resume`.
 
 ## Close guard
 

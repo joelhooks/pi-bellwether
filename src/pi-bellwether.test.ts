@@ -70,8 +70,11 @@ class EventBus {
   }
 }
 
+type TestCommand = (args: string, ctx: unknown) => Promise<void>;
+
 function harness(branch: unknown[] = []) {
   const tools = new Map<string, TestTool>();
+  const commands = new Map<string, TestCommand>();
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const messages: unknown[] = [];
   const entries: unknown[] = [];
@@ -85,7 +88,9 @@ function harness(branch: unknown[] = []) {
     on(event: string, handler: (...args: unknown[]) => unknown) {
       handlers.set(event, handler);
     },
-    registerCommand() {},
+    registerCommand(name: string, command: { handler: TestCommand }) {
+      commands.set(name, command.handler);
+    },
     registerTool(tool: TestTool) {
       tools.set(tool.name, tool);
     },
@@ -95,7 +100,7 @@ function harness(branch: unknown[] = []) {
   };
   // SAFETY: the extension factory only uses the methods supplied by this test double.
   bellwetherExtension(apiDouble as unknown as ExtensionAPI);
-  return { tools, handlers, messages, entries, events };
+  return { tools, commands, handlers, messages, entries, events };
 }
 
 function context(branch: unknown[] = [], notifications: string[] = []) {
@@ -1840,5 +1845,92 @@ test("herdr_ping_wait survives reload without extending its deadline", async () 
     },
   });
   expect(notifications).toContain("Bellwether resumed 1 wait after reload");
+  await second.handlers.get("session_shutdown")?.({ reason: "quit" });
+});
+
+test("quit writes a suspension entry and /herdr-resume restores it in a fresh process", async () => {
+  process.env.HERDR_PING_WAIT_BIN = await waiterExecutable(1_000);
+  const branch: unknown[] = [];
+  const first = harness(branch);
+  const firstContext = context(branch);
+  await first.handlers.get("session_start")?.({ reason: "startup" }, firstContext);
+  const firstTool = first.tools.get("herdr_ping_wait");
+  if (!firstTool) throw new Error("herdr_ping_wait was not registered");
+  const started = await firstTool.execute(
+    "call-1",
+    { action: "start", paneIds: ["w1:p1"], timeoutSeconds: 60 },
+    undefined,
+    undefined,
+    firstContext,
+  );
+  await first.handlers.get("session_shutdown")?.({ reason: "quit" });
+  expect(first.entries.at(-1)).toMatchObject({
+    type: "bellwether-suspended",
+    data: { pingWaits: [{ input: { id: (started.details as { id: string }).id } }] },
+  });
+
+  // A fresh process resuming the same session file restores nothing by itself.
+  const notifications: string[] = [];
+  const second = harness(branch);
+  const secondContext = context(branch, notifications);
+  await second.handlers.get("session_start")?.({ reason: "startup" }, secondContext);
+  await sleep(50);
+  expect(second.messages).toHaveLength(0);
+  expect(notifications.filter((line) => line.includes("resumed"))).toHaveLength(0);
+
+  const resume = second.commands.get("herdr-resume");
+  if (!resume) throw new Error("herdr-resume was not registered");
+  await resume("", secondContext);
+  expect(notifications).toContain("Bellwether resumed 1 wait from the newest suspension entry");
+  await vi.waitFor(() => expect(second.messages).toHaveLength(1), { timeout: 2_000 });
+  expect(second.messages[0]).toMatchObject({
+    customType: "herdr-ping-wait",
+    details: { id: (started.details as { id: string }).id, status: "matched" },
+  });
+
+  // Running it again never duplicates a wait this process already handled.
+  await resume("", secondContext);
+  expect(notifications).toContain(
+    "No suspended Bellwether waits to resume (already handled by this process)",
+  );
+  expect(second.messages).toHaveLength(1);
+  await second.handlers.get("session_shutdown")?.({ reason: "quit" });
+});
+
+test("session replacement writes no suspension entry", async () => {
+  process.env.HERDR_PING_WAIT_BIN = await waiterExecutable(5_000);
+  const branch: unknown[] = [];
+  const { tools, handlers, entries } = harness(branch);
+  await handlers.get("session_start")?.({ reason: "startup" }, context(branch));
+  const tool = tools.get("herdr_ping_wait");
+  if (!tool) throw new Error("herdr_ping_wait was not registered");
+  await tool.execute("call-1", { action: "start", paneIds: ["w1:p1"], timeoutSeconds: 60 }, undefined, undefined, context(branch));
+  await handlers.get("session_shutdown")?.({ reason: "new" });
+  expect(entries.some((entry) => (entry as { type: string }).type === "bellwether-suspended")).toBe(false);
+});
+
+test("startup warns once about pre-fix intercom presence chatter on the branch", async () => {
+  const branch: unknown[] = [];
+  for (let index = 0; index < 1_500; index += 1) {
+    branch.push({
+      type: "custom",
+      customType: "bellwether-intercom-signal",
+      id: `c${index}`,
+      parentId: null,
+      data: { eventId: `e${index}`, kind: index % 2 === 0 ? "capability" : "binding", sourceSessionId: "peer" },
+    });
+  }
+  const notifications: string[] = [];
+  const { handlers } = harness(branch);
+  await handlers.get("session_start")?.({ reason: "startup" }, context(branch, notifications));
+  const warning = notifications.find((line) => line.startsWith("Bellwether: this session carries"));
+  expect(warning).toContain("1,500");
+  expect(warning).toContain("strip-intercom-chatter.mjs");
+  await handlers.get("session_shutdown")?.({ reason: "quit" });
+
+  const clean: string[] = [];
+  const second = harness([]);
+  await second.handlers.get("session_start")?.({ reason: "startup" }, context([], clean));
+  expect(clean.some((line) => line.startsWith("Bellwether: this session carries"))).toBe(false);
   await second.handlers.get("session_shutdown")?.({ reason: "quit" });
 });

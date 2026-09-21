@@ -15,7 +15,8 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - Each `herdr_watch` owns one direct wait socket. It never shells out or starts a child process.
 - `herdr_agent prompt` is a bounded delivery handshake. Resolve a stable pane ID, submit once, and require Herdr-observed `working` state within one 30-second proof deadline. A stall recovery may use `agent.wait`; it must never resubmit or wait for completion. The public schema exposes no wait options, and prompt starts no watch.
 - Use Herdr `error.code`. Do not classify errors from message text.
-- Cancel and non-reload `session_shutdown` close exact owned sockets and suppress late wakes. `/reload` first persists active direct and degraded waits into a versioned branch entry, then closes them and restores only in the replacement extension instance without extending deadlines.
+- Cancel and non-reload `session_shutdown` close exact owned sockets and suppress late wakes. `/reload` and `quit` first persist active direct and degraded waits into a versioned branch entry, then close them. Only the replacement extension instance after `/reload` restores automatically, without extending deadlines. `/herdr-resume` is the one explicit restore path after a process restart: newest entry, expired and already-active waits skipped, never automatic. Session replacement writes nothing.
+- Every non-reload `session_start` counts pre-fix `bellwether-intercom-signal` presence entries on the branch (`src/chatter.ts`) and prints one warning at 1,000 or more naming `scripts/strip-intercom-chatter.mjs`. Startup must not delete or rewrite anything.
 - Tool `details` must remain structured-clone-safe plain data.
 - Keep `herdr_ping_wait` visibly degraded and isolated. Only explicit `action=start` may spawn its child.
 

@@ -37,3 +37,11 @@ The old actor ends as `cancelled` while shutdown suppresses its wake. The replac
 
 - `src/suspension.test.ts` checks versioned round trips and newest-entry authority.
 - `src/pi-bellwether.test.ts` runs direct and degraded waits across simulated reloads, verifies stable IDs, and checks that the resumed direct timeout is smaller than the original deadline.
+
+## Explicit resume after a process restart (2026-09-21)
+
+`quit` now writes the same suspension entry as `/reload`. It restores nothing on its own: a fresh process that resumes the session file starts with no waits, and `/herdr-resume` reads the newest entry only when the operator asks. `withoutExpired` in `src/suspension.ts` drops waits whose absolute deadline passed while no process owned them; `restoreSuspended` in the extension skips ids that are already active. Session replacement (`new`, `resume`, `fork`) still writes nothing.
+
+Why: two sessions that had been open for a week carried 528k and 156k pre-fix presence entries (`bellwether-intercom-signal` with kind `capability` or `binding`, stopped by 994c545). Each process held a 1 GB heap and sat at 80 to 99 percent CPU on GC while idle. Cleaning them needed a restart, and a restart lost every watch, so the watches had to be re-armed by hand from the suspension record. `src/chatter.ts` now counts that chatter on every non-reload start and `scripts/strip-intercom-chatter.mjs` removes it with the id/parentId tree re-linked and verified.
+
+Regression boundary additions: `src/chatter.test.ts`, the `withoutExpired` case in `src/suspension.test.ts`, and three cases in `src/pi-bellwether.test.ts` (quit writes and `/herdr-resume` restores; session replacement writes nothing; startup warns about chatter once and stays quiet on a clean branch).

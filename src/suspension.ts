@@ -132,6 +132,23 @@ const EMPTY_SUSPENSION: BellwetherSuspensionData = {
   watches: [],
 };
 
+/**
+ * For an explicit `/herdr-resume` after a process restart: waits whose absolute
+ * deadline passed while no process owned them are history, not work.
+ */
+export const withoutExpired = (
+  data: BellwetherSuspensionData,
+  now: number,
+): { readonly live: BellwetherSuspensionData; readonly expired: number } => {
+  const alive = (expiresAt: number | undefined) => expiresAt === undefined || expiresAt > now;
+  const watches = data.watches.filter((watch) => alive(watch.expiresAt));
+  const pingWaits = data.pingWaits.filter((wait) => alive(wait.expiresAt));
+  return {
+    expired: data.watches.length - watches.length + data.pingWaits.length - pingWaits.length,
+    live: { ...data, pingWaits, watches },
+  };
+};
+
 /** The newest suspension entry is authoritative; malformed data restores nothing. */
 export const bellwetherSuspensionFrom = (
   entries: readonly SessionEntry[],

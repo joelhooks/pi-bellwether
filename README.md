@@ -63,7 +63,11 @@ Initial kinds:
 
 `start` returns a cloneable running receipt immediately. The public timeout field is `timeoutSeconds`; `7200` means two hours. Bellwether converts seconds to Herdr milliseconds once at the extension boundary. Bellwether exposes no ambiguous public `timeout` field. Wake policies are `agent`, `notify`, and `silent`. Agent-state watches race the event-driven wait against a five-second liveness probe. Explicit `agent_not_found`, `agent_not_running`, or identity replacement settles as `targetGone`; transient probe failures do not override the wait. Cancel and non-reload `session_shutdown` close exact owned sockets and suppress late wakes. Bellwether stops terminal actors and retains only the newest 64 terminal receipts per session.
 
-`/reload` is different: Bellwether writes one versioned suspension entry into the current Pi branch, closes its exact sockets and fallback child processes, then restores active waits in the new extension instance. Absolute deadlines do not restart. Only `reason: "reload"` restores them; new, resumed, and forked sessions never revive stale waits. The newest suspension entry is authoritative, including an empty or malformed one.
+`/reload` is different: Bellwether writes one versioned suspension entry into the current Pi branch, closes its exact sockets and fallback child processes, then restores active waits in the new extension instance. Absolute deadlines do not restart. Only `reason: "reload"` restores them automatically; new, resumed, and forked sessions never revive stale waits. The newest suspension entry is authoritative, including an empty or malformed one.
+
+`/quit` writes the same suspension entry. After a process restart against the same session file (`pi --session <file>`), `/herdr-resume` restores the newest entry on request: it skips waits whose absolute deadline already passed and waits that are already active, and it never runs by itself. Run it before the first `/reload` in the new process, because a reload writes a fresh (possibly empty) entry that becomes the newest.
+
+On every non-reload start Bellwether counts pre-fix intercom presence entries on the branch (versions before 1.2.1 recorded every `capability` and `binding` announcement). At 1,000 or more it prints one warning naming `scripts/strip-intercom-chatter.mjs`, which drops those entries, re-links the id/parentId tree, verifies it, and backs the file up before rewriting. Quit the owning Pi process first; a live process keeps the old entries in memory.
 
 The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. Bellwether has no workflow-watch adapter. Add one only when a concrete consumer and result contract exist.
 
@@ -91,6 +95,7 @@ Bellwether keeps bounded human commands:
 - `/herdr-read <agent target>`
 - `/herdr-focus <agent target>`
 - `/herdr-stop <agent target>`
+- `/herdr-resume` — restore waits from the newest suspension entry after a process restart; expired waits are skipped.
 
 The old split send/submit and combined start commands are gone.
 
