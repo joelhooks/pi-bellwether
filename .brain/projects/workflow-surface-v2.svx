@@ -68,6 +68,17 @@ The broadcast is gone: capability, binding, watch lifecycle, wake hints, and wor
 
 We did not need an upstream pi-intercom change. Herdr already records a Pi pane's session file as `agent_session.value`. The filename ends in the Pi session ID, and pi-intercom uses the same ID (`PI_INTERCOM_SESSION_ID == PI_SESSION_ID`, checked 2026-09-23). `herdr_layout overview` adds `piSessionId` per Pi agent. With intercom connected, it adds `intercom: { name, status }`, or `null` when the session is unreachable.
 
+## Fleet rollout (2026-09-23)
+
+- pi-until PR #5 merged as `eff388f` by `shitratgit[bot]`.
+- `pi update git:github.com/joelhooks/{pi-bellwether,pi-until}@main --approve` ran on Flagg, Panda, and Blaine. Every host is now at pi-bellwether `84327b6` and pi-until `eff388f`, on Pi 0.87.1. A fresh `PI_OFFLINE=1 pi --help` load logged no extension errors on any host.
+- Herdr `$wait` sidebar row:
+  - Flagg: applied through `fleet-graft install`, then `reload-config`.
+  - Blaine: rendered from `origin/main`'s template with `machines/blaine` theme, a backup was written, then `reload-config` applied it. Blaine's dark-wizard checkout was 28 commits behind with uncommitted prompt edits and a staged `machines/Mac -> blaine` alias, so `fleet-graft install` there was unsafe.
+  - Panda: not applied. No Herdr server runs there, and uncommitted prompt edits in its dark-wizard make `fleet-graft install` unsafe.
+- Panda has no pi-intercom. Its overview reports `intercom: "unavailable"`, which is the intended fallback.
+- Running Pi sessions keep the old code until `/reload`.
+
 ## Receipts
 
 - pi-bellwether: typecheck, 120 vitest tests, smoke, pack check, and audit pass.
