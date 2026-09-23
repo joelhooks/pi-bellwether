@@ -199,7 +199,10 @@ export function decodeBellwetherSignal(value: unknown): BellwetherSignal | undef
     (value.watchKind === "agent_state" || value.watchKind === "pane_output") &&
     isWatchStatus(value.status) &&
     isWatchLifecycle(value.lifecycle) &&
-    (value.phase === undefined || value.phase === "starting" || value.phase === "running") &&
+    (value.phase === undefined ||
+      value.phase === "gated" ||
+      value.phase === "starting" ||
+      value.phase === "running") &&
     (value.pane === undefined || typeof value.pane === "string") &&
     (value.target === undefined || typeof value.target === "string")
   ) {

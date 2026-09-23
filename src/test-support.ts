@@ -247,6 +247,8 @@ export function resultForMethod(method: string): Record<string, unknown> {
     case "pane.send_text":
     case "pane.send_keys":
     case "pane.close":
+    case "pane.report_metadata":
+    case "workspace.report_metadata":
     case "agent.send_keys":
       return { type: "ok" };
     default:

@@ -14,6 +14,7 @@ import {
   type WatchReceipt,
 } from "./watch.ts";
 import { HerdrApiError } from "./herdr-client.ts";
+import type { PromptGateOutcome } from "./prompt-gate.ts";
 import {
   agentInfo,
   failure,
@@ -349,6 +350,113 @@ describe("Herdr watch XState lifecycle", () => {
         { mode: "tui" },
       ),
     ).toThrow(`at most ${MAX_ACTIVE_WATCHES}`);
+    await registry.shutdown();
+  });
+});
+
+describe("prompt-gated agent_state watches", () => {
+  function gatedRegistry(
+    server: FakeHerdrServer,
+    gate: (input: WatchInput) => Promise<PromptGateOutcome> | undefined,
+    messages: unknown[] = [],
+  ) {
+    return createWatchRegistry({
+      client: createHerdrClient({ socketPath: server.socketPath }),
+      agentProbeIntervalMs: 60_000,
+      promptGate: gate,
+      sendMessage(message) {
+        messages.push(message);
+      },
+    });
+  }
+
+  test("arms the Herdr wait only after the pending prompt proves life", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    let open: (outcome: PromptGateOutcome) => void = () => {};
+    const registry = gatedRegistry(
+      server,
+      () => new Promise((resolve) => {
+        open = resolve;
+      }),
+    );
+
+    const started = registry.start(
+      { kind: "agent_state", target: "worker", wake: "silent" },
+      { mode: "tui" },
+    );
+    expect(started.phase).toBe("gated");
+    await sleep(20);
+    expect(server.requests).toHaveLength(0);
+
+    open({ kind: "open" });
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt.status).toBe("matched");
+    expect(server.requests.map((request) => request.method)).toContain("agent.wait");
+    await registry.shutdown();
+  });
+
+  test("fails with prompt_unproven and never touches Herdr", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    const messages: unknown[] = [];
+    const registry = gatedRegistry(
+      server,
+      async () => ({ kind: "unproven", target: "worker", reason: "agent_prompt_stalled" }),
+      messages,
+    );
+
+    const started = registry.start(
+      { kind: "agent_state", target: "worker" },
+      { mode: "tui" },
+    );
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt).toMatchObject({ status: "failed", code: "prompt_unproven" });
+    expect(receipt.failure).toContain("agent_prompt_stalled");
+    expect(server.requests).toHaveLength(0);
+    expect(messages).toHaveLength(1);
+    await registry.shutdown();
+  });
+
+  test("cancel while gated closes cleanly without a wake", async () => {
+    const server = await startFakeHerdrServer(() => {});
+    servers.push(server);
+    const messages: unknown[] = [];
+    const registry = gatedRegistry(server, () => new Promise(() => {}), messages);
+
+    const started = registry.start(
+      { kind: "agent_state", target: "worker" },
+      { mode: "tui" },
+    );
+    registry.cancel(started.id);
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt.status).toBe("cancelled");
+    expect(server.requests).toHaveLength(0);
+    expect(messages).toHaveLength(0);
+    await registry.shutdown();
+  });
+
+  test("pane_output watches never consult the prompt gate", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    let consulted = 0;
+    const registry = gatedRegistry(server, () => {
+      consulted += 1;
+      return new Promise(() => {});
+    });
+
+    const started = registry.start(
+      { kind: "pane_output", pane: "w1:p1", match: "DONE", wake: "silent" },
+      { mode: "tui" },
+    );
+    expect((await waitForTerminal(() => registry.status(started.id))).status).toBe("matched");
+    expect(consulted).toBe(0);
     await registry.shutdown();
   });
 });

@@ -1,0 +1,57 @@
+---
+title: "Workflow surface v2: prompt gate, sidebar, wake routing"
+type: "project"
+status: "active"
+created_at: "2026-09-23"
+privacy: "private"
+tags:
+  - bellwether
+  - herdr
+  - pi-until
+  - pi-intercom
+  - sidebar
+---
+
+# Workflow surface v2
+
+## Why
+
+On 2026-09-23 we checked Bellwether against real orchestration use. The primitives held up: direct-socket watches, proof-of-life prompts, reload survival. The workflow layer on top of them was thin:
+
+1. `herdr-orchestration` documented a footgun as prose: "A watch started in the same turn as the prompt fires within a minute on the previous task's leftover idle state." Pi runs tool calls in parallel by default (`pi-agent-core` `executeToolCalls`). Herdr `agent.wait` also returns at once when the agent already sits in a requested state.
+2. The owner gets one wake per worker, although the skill calls owner tokens the scarce resource.
+3. Nothing reads the `bellwether/herdr/v1` intercom namespace. `publishWake` and `publishWorkflowReceipt` have no caller. Its presence chatter caused the 528k-entry session bloat.
+4. Bellwether wakes bypass pi-until's session-wide follow-up arbiter.
+5. The Herdr sidebar has no line for what a session is waiting on. No reporter publishes the configured workspace tokens `$progress`, `$agents`, or `$needs`.
+
+## Decisions
+
+- Do not move `herdr_watch` onto pi-until. An event-driven wait over the socket is better than shell polling. pi-until owns wake scheduling and recurring supervision, not Herdr observation.
+- Do not grow the intercom broadcast. The useful integration is identity: which intercom session lives in which Herdr pane.
+
+## Slice 1: prompt gate (built)
+
+On an assistant `message_end`, Bellwether records every `herdr_agent prompt` call in that message as a pending prompt. In parallel and sequential tool modes alike, this runs before any tool executes. An `agent_state` watch started while a prompt is pending enters a `gated` phase. It arms its Herdr wait only after every pending prompt settles. The watch fails with `prompt_unproven` when a prompt to the same target returned no proof of life. At `turn_end`, any pending prompt whose call never executed settles as unproven.
+
+Matching uses the raw prompt target, plus the proven pane ID and agent name, so a prompt by name and a watch by pane ID still match.
+
+## Slice 2: sidebar reporter (built)
+
+Source `user:bellwether.v1`. Probe receipts from Herdr 0.9.1 on 2026-09-23:
+
+- Token names are one merged map across sources. The last writer wins, and a clear from any source removes the token.
+- An older `seq` is ignored silently. `ttl_ms` expiry works.
+- The direct socket accepts `pane.report_metadata` and `workspace.report_metadata`, and each returns `{type:"ok"}`.
+
+Behavior:
+
+- Pane `$wait` on the caller's own pane lists active watches, e.g. `⏳ reviewer · 4m` or `⏳ 3 waits · reviewer +2 · 12m`. It is cleared explicitly when the last watch ends.
+- Workspace `$agents` (for example `2 working · 1 blocked`) and `$needs` (blocked agent names; `null` clears the row) come from the session that currently owns watches. Leases are refreshed, never cleared explicitly, so one session cannot wipe another's view.
+- `$progress` stays owned by `herdr-workflow`.
+- The reporter makes no request while no watch is active. Startup stays side-effect free.
+
+## Next slices (not built)
+
+3. Coalesce wakes that settle within a short window into one follow-up.
+4. pi-until: route wakes through a shared arbiter event when present; recommend `until repeat` as a supervision safety net in the orchestration skill.
+5. Intercom: delete presence and watch broadcast. Upstream `HERDR_PANE_ID` into pi-intercom `SessionInfo`. Join intercom session names into `herdr_layout overview`.

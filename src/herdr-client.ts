@@ -219,6 +219,8 @@ export const HERDR_METHOD_RESULT_TAGS = {
   "pane.send_keys": ["ok"],
   "pane.close": ["ok"],
   "pane.wait_for_output": ["output_matched"],
+  "pane.report_metadata": ["ok"],
+  "workspace.report_metadata": ["ok"],
   "agent.list": ["agent_list"],
   "agent.get": ["agent_info"],
   "agent.start": ["agent_started"],

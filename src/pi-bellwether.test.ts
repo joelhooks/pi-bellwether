@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -29,6 +29,12 @@ const servers: FakeHerdrServer[] = [];
 const originalWaiterBinary = process.env.HERDR_PING_WAIT_BIN;
 const originalSocketPath = process.env.HERDR_SOCKET_PATH;
 const originalPaneId = process.env.HERDR_PANE_ID;
+
+beforeEach(() => {
+  // The suite may run inside a Herdr pane. The sidebar reporter only reports for
+  // an explicit caller pane, so exact request-count tests start without one.
+  delete process.env.HERDR_PANE_ID;
+});
 
 afterEach(async () => {
   if (originalWaiterBinary === undefined) delete process.env.HERDR_PING_WAIT_BIN;
@@ -503,6 +509,165 @@ describe("Bellwether public surface", () => {
     expect(watches.content[0]?.text).toContain("No active Herdr watches");
     expect(() => structuredClone(result.details)).not.toThrow();
     await handlers.get("session_shutdown")?.();
+  });
+
+  test("a watch in the same message as its prompt arms only after proof of life", async () => {
+    let releaseProof: () => void = () => {};
+    const proofGate = new Promise<void>((resolve) => {
+      releaseProof = resolve;
+    });
+    const server = await startFakeHerdrServer(async (request, socket) => {
+      if (request.method === "agent.prompt") {
+        await proofGate;
+        socket.end(
+          success(request, { type: "agent_prompted", agent: agentInfo({ agent_status: "working" }) }),
+        );
+        return;
+      }
+      if (request.method === "agent.wait") return;
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const agent = tools.get("herdr_agent");
+    const watch = tools.get("herdr_watch");
+    if (!agent || !watch) throw new Error("required tools missing");
+
+    await handlers.get("message_end")?.({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-watch", name: "herdr_watch", arguments: { action: "start", kind: "agent_state", target: "worker" } },
+          { type: "toolCall", id: "call-prompt", name: "herdr_agent", arguments: { action: "prompt", target: "worker", prompt: "go" } },
+        ],
+      },
+    });
+
+    try {
+      const started = await watch.execute(
+        "call-watch",
+        { action: "start", kind: "agent_state", target: "worker", wake: "silent" },
+        undefined,
+        undefined,
+        context(),
+      );
+      expect(started.details).toMatchObject({ phase: "gated" });
+      const prompted = agent.execute(
+        "call-prompt",
+        { action: "prompt", target: "worker", prompt: "go" },
+        undefined,
+        undefined,
+        context(),
+      );
+      await vi.waitFor(() =>
+        expect(server.requests.map((request) => request.method)).toContain("agent.prompt"),
+      );
+      await sleep(20);
+      expect(server.requests.map((request) => request.method)).not.toContain("agent.wait");
+
+      releaseProof();
+      await prompted;
+      await vi.waitFor(() =>
+        expect(server.requests.map((request) => request.method)).toContain("agent.wait"),
+      );
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
+  test("reports sidebar wait metadata only while a watch is active", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "pane.wait_for_output") return;
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const { tools, handlers } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    await sleep(30);
+    expect(server.requests).toHaveLength(0);
+
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+    const started = await watch.execute(
+      "call-1",
+      { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE", label: "tests green", wake: "silent" },
+      undefined,
+      undefined,
+      context(),
+    );
+    await vi.waitFor(() =>
+      expect(server.requests).toContainEqual(
+        expect.objectContaining({
+          method: "pane.report_metadata",
+          params: expect.objectContaining({
+            tokens: { wait: expect.stringContaining("tests green") },
+          }),
+        }),
+      ),
+    );
+
+    await watch.execute(
+      "call-2",
+      { action: "cancel", id: (started.details as { id: string }).id },
+      undefined,
+      undefined,
+      context(),
+    );
+    await vi.waitFor(() =>
+      expect(server.requests.at(-1)).toMatchObject({
+        method: "pane.report_metadata",
+        params: { tokens: { wait: null } },
+      }),
+    );
+    await handlers.get("session_shutdown")?.();
+  });
+
+  test("a prompt call that never executes fails its gated watch at turn end", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+
+    await handlers.get("message_end")?.({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-prompt", name: "herdr_agent", arguments: { action: "prompt", target: "worker", prompt: "go" } },
+        ],
+      },
+    });
+    try {
+      const started = await watch.execute(
+        "call-watch",
+        { action: "start", kind: "agent_state", target: "worker" },
+        undefined,
+        undefined,
+        context(),
+      );
+      await handlers.get("turn_end")?.({ type: "turn_end" });
+      await vi.waitFor(() => expect(messages).toHaveLength(1));
+      expect(messages[0]).toMatchObject({
+        details: {
+          id: (started.details as { id: string }).id,
+          status: "failed",
+          code: "prompt_unproven",
+        },
+      });
+      expect(server.requests).toHaveLength(0);
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
   });
 
   test("accepted targeted intercom wake triggers one hidden typed follow-up", async () => {

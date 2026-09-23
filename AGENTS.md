@@ -11,7 +11,9 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - Keep extension startup side-effect free. Resolve sockets only during commands, tools, or explicit watch starts.
 - Use one newline-delimited JSON request per Herdr socket. Never pool Herdr sockets.
 - Effect 4.0.0-beta.99 owns path resolution, framing, Schema decoding, typed errors, timeouts, interruption, and socket cleanup.
-- XState 5.32.5 owns watch lifecycle only: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
+- XState 5.32.5 owns watch lifecycle only: `[gated ->] starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
+- `gated` exists only for `agent_state` watches started while a same-session prompt is in flight (`src/prompt-gate.ts`). `message_end` announces prompt calls before any tool runs; `turn_end` settles calls that never executed. An unproven prompt to the watched target fails the watch with `prompt_unproven`.
+- The sidebar reporter (`src/sidebar.ts`) is display-only. It sends no request while no watch is active, clears only its own pane `$wait`, and leaves shared workspace tokens to lease expiry.
 - Each `herdr_watch` owns one direct wait socket. It never shells out or starts a child process.
 - `herdr_agent prompt` is a bounded delivery handshake. Resolve a stable pane ID, submit once, and require Herdr-observed `working` state within one 30-second proof deadline. A stall recovery may use `agent.wait`; it must never resubmit or wait for completion. The public schema exposes no wait options, and prompt starts no watch.
 - Use Herdr `error.code`. Do not classify errors from message text.
