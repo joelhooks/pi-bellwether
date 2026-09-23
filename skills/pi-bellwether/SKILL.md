@@ -71,9 +71,11 @@ It makes no Herdr request while no watch is active. `$progress` belongs to `herd
 
 Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and refuses the pane that hosts Pi.
 
-## Intercom
+## Intercom and wakes
 
-Bellwether publishes compact live hints through `bellwether/herdr/v1` when pi-intercom supports `extension-bus-v1`. Targeted wake hints trigger one hidden typed Pi follow-up. Workflow-receipt hints only tell the receiver to reread durable `herdr-workflow` state. Herdr and `herdr-workflow` remain authority.
+`herdr_layout overview` lists each Pi agent's `piSessionId` and, when pi-intercom is connected, its intercom name and status (`intercom: null` means unreachable). Use that ID with `intercom send` to reach a worker directly. Give workers the owner's `PI_SESSION_ID` as their report-to address. A worker's intercom report is its claim; the watch receipt and the artifact remain the evidence.
+
+Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
 
 ## Degraded fallback
 

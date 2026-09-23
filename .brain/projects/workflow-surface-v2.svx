@@ -50,8 +50,25 @@ Behavior:
 - `$progress` stays owned by `herdr-workflow`.
 - The reporter makes no request while no watch is active. Startup stays side-effect free.
 
-## Next slices (not built)
+## Slice 3: batched wakes (built, 1.4.0)
 
-3. Coalesce wakes that settle within a short window into one follow-up.
-4. pi-until: route wakes through a shared arbiter event when present; recommend `until repeat` as a supervision safety net in the orchestration skill.
-5. Intercom: delete presence and watch broadcast. Upstream `HERDR_PANE_ID` into pi-intercom `SessionInfo`. Join intercom session names into `herdr_layout overview`.
+`src/wake.ts` holds wakes while the agent runs (`agent_start` to `agent_end`) and sends them as one `bellwether-wakes` follow-up about 250 ms after it goes idle. Idle-time bursts merge too. A missed `agent_end` delays a held wake by at most five minutes. It never drops one. Shutdown flushes held wakes directly.
+
+Why hold while busy instead of a fixed window: wakes pile up during long owner turns. A fixed window would still give one turn per worker.
+
+## Slice 4: pi-until arbiter (built; pi-until PR #5)
+
+pi-until accepts version 1 requests on `pi-until:follow-up` and calls `accept()` synchronously once it queues them. Bellwether offers every batch there first and falls back to `pi.sendMessage` when nothing accepts, so either package works alone. Routed wakes arrive with `details: { followUpId, receipt }`.
+
+The orchestration skill now recommends an `until repeat` supervision tick as a safety net for lost wakes. That is guidance, not code.
+
+## Slice 5: intercom as a directory (built, 1.4.0)
+
+The broadcast is gone: capability, binding, watch lifecycle, wake hints, and workflow-receipt hints. Bellwether registers `bellwether/directory/v1` only to call `listSessions()`, and publishes nothing.
+
+We did not need an upstream pi-intercom change. Herdr already records a Pi pane's session file as `agent_session.value`. The filename ends in the Pi session ID, and pi-intercom uses the same ID (`PI_INTERCOM_SESSION_ID == PI_SESSION_ID`, checked 2026-09-23). `herdr_layout overview` adds `piSessionId` per Pi agent. With intercom connected, it adds `intercom: { name, status }`, or `null` when the session is unreachable.
+
+## Receipts
+
+- pi-bellwether: typecheck, 120 vitest tests, smoke, pack check, and audit pass.
+- pi-until: `npm run check` passes: typecheck, ultracite, oxfmt, and 87 tests.

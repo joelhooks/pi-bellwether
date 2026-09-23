@@ -73,20 +73,23 @@ On every non-reload start Bellwether counts pre-fix intercom presence entries on
 
 The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. Bellwether has no workflow-watch adapter. Add one only when a concrete consumer and result contract exist.
 
+## Wakes
+
+Watch and degraded ping-wait settlements wake the agent through one router (`src/wake.ts`).
+
+- Wakes that settle while the agent runs are held until `agent_end`, then sent as one follow-up about 250 ms later. A burst of idle-time settlements also merges. Several wakes arrive as `bellwether-wakes` with every receipt in the content and `details.wakes`; a single wake keeps its original custom type and details.
+- A held wake is delayed at most five minutes if an `agent_end` is missed. It is never dropped.
+- Bellwether first offers the follow-up to pi-until's session arbiter on `pi-until:follow-up`. When pi-until accepts, it serializes the wake with its own follow-ups and Pi receives `details: { followUpId, receipt }`. Otherwise Bellwether sends the follow-up directly.
+- Session shutdown delivers held wakes directly, because pi-until may be stopping its queue in the same shutdown.
+
 ## Pi intercom
 
-Bellwether optionally registers `bellwether/herdr/v1` through `pi.events` and pi-intercom's `extension-bus-v1` contract.
+Bellwether reads pi-intercom; it does not publish on it. It registers `bellwether/directory/v1` with `ownerEligible: false` only to list live intercom sessions.
 
-- Registration uses `ownerEligible: false`.
-- Traffic contains only capability, pane/session binding, watch lifecycle, targeted wake, and workflow-receipt hints.
-- Traffic contains no prompts, terminal output, transcripts, socket paths, or workflow bodies.
-- Recipients filter target session/pane and deduplicate the newest 256 event IDs.
-- A peer's first join or presence event and every reconnect republish bindings and active watch hints. Repeat presence updates and departures publish nothing, so N sessions do not generate N² traffic.
-- Session files record only decision-grade signals: watch lifecycle transitions and workflow-receipt hints as `bellwether-intercom-signal`, and targeted wakes as `bellwether-intercom-wake-hint`. Capability, binding, and reconciled-watch replays are never recorded.
-- A targeted wake invokes one injected local callback. Pi has no wake-only primitive, so the adapter emits a hidden typed custom follow-up (`bellwether-intercom-wake`) to trigger the turn. This custom message enters Pi context but carries only event, source session, and optional watch IDs.
-- Missing or unsupported pi-intercom leaves local Herdr tools and watches unchanged.
-
-Intercom messages are hints. Herdr and `herdr-workflow` remain authority.
+- `herdr_layout overview` adds `piSessionId` to each Pi agent, parsed from Herdr's `agent_session` path. pi-intercom uses the same ID, so `intercom send` can target it directly.
+- When pi-intercom is connected, each Pi agent also gets `intercom: { name, status }`, or `intercom: null` when that session is not reachable. Details report `intercom: "connected" | "unavailable"`. The session list read is bounded to 1.5 seconds.
+- Bellwether versions up to 1.3 broadcast capability, binding, watch, wake, and workflow-receipt hints on `bellwether/herdr/v1`. Nothing consumed them, and recording them bloated session files. That traffic is gone. The startup chatter warning still detects old entries.
+- Missing or unsupported pi-intercom leaves every Herdr tool unchanged.
 
 ## Slash commands
 

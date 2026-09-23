@@ -22,13 +22,11 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - Tool `details` must remain structured-clone-safe plain data.
 - Keep `herdr_ping_wait` visibly degraded and isolated. Only explicit `action=start` may spawn its child.
 
-## Intercom
+## Intercom and wakes
 
-Register `bellwether/herdr/v1` through `pi.events`. Do not statically import pi-intercom at runtime.
+Register `bellwether/directory/v1` through `pi.events` with `ownerEligible: false`, only to read pi-intercom's live session list for `herdr_layout overview`. Never publish on the bus and never record bus traffic. Do not statically import pi-intercom at runtime.
 
-Use `ownerEligible: false`. Publish compact capability, binding, and watch hints only. Prompts, output, transcripts, workflow bodies, and ownership state stay off the bus.
-
-Lost bus traffic may delay a hint. It cannot lose or invent Herdr or workflow truth.
+Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly.
 
 ## Public tools
 

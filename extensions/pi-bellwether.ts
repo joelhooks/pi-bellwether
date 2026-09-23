@@ -34,9 +34,12 @@ import type {
   HerdrResult,
 } from "../src/herdr-client.ts";
 import {
-  createIntercomCoordination,
-  type IntercomCoordination,
+  createIntercomDirectory,
+  piSessionIdFromAgent,
+  type IntercomDirectory,
+  type IntercomSession,
 } from "../src/intercom.ts";
+import { createWakeRouter } from "../src/wake.ts";
 import {
   createPingWaitActor,
   resolvePingWaitBinary,
@@ -49,7 +52,6 @@ import type {
   PingWaitStatus,
 } from "../src/ping-wait.ts";
 import {
-  INTERCOM_SIGNAL_ENTRY_TYPE,
   countPresenceChatter,
   presenceChatterWarning,
 } from "../src/chatter.ts";
@@ -339,6 +341,43 @@ function summarizeAgent(agent: JsonRecord): string {
   const status = requiredStringField(agent, "agent_status");
   const cwd = stringField(agent, "cwd");
   return `${inlineField(name)}: [${inlineField(pane)}] (${inlineField(status)})${cwd ? ` ${inlineField(cwd)}` : ""}`;
+}
+
+/**
+ * Adds `piSessionId` for Pi agents and, when pi-intercom is connected, their
+ * live intercom identity (`null` means not reachable over intercom).
+ */
+function withIntercomIdentity(
+  agent: JsonRecord,
+  sessions: readonly IntercomSession[] | undefined,
+): JsonRecord {
+  const piSessionId = piSessionIdFromAgent(agent);
+  if (!piSessionId) return agent;
+  if (!sessions) return { ...agent, piSessionId };
+  const peer = sessions.find((session) => session.id === piSessionId);
+  return {
+    ...agent,
+    piSessionId,
+    intercom: peer
+      ? {
+          ...(peer.name ? { name: peer.name } : {}),
+          ...(peer.status ? { status: peer.status } : {}),
+        }
+      : null,
+  };
+}
+
+function summarizeOverviewAgent(agent: JsonRecord): string {
+  const piSessionId = stringField(agent, "piSessionId");
+  if (!piSessionId) return summarizeAgent(agent);
+  let intercom = "";
+  if (agent.intercom === null) intercom = " intercom offline";
+  else if (isRecord(agent.intercom)) {
+    const name = stringField(agent.intercom, "name") ?? "unnamed";
+    const status = stringField(agent.intercom, "status");
+    intercom = ` intercom ${inlineField(name)}${status ? ` (${inlineField(status)})` : ""}`;
+  }
+  return `${summarizeAgent(agent)} pi ${inlineField(piSessionId)}${intercom}`;
 }
 
 function summarizePane(pane: JsonRecord, currentPaneId?: string): string {
@@ -1044,13 +1083,20 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   const client = createHerdrClient();
   const pingWaits = new Map<string, PingWaitRecord>();
   let currentContext: ExtensionContext | undefined;
-  let coordination: IntercomCoordination | undefined;
+  let directory: IntercomDirectory | undefined;
+  let agentBusy = false;
   let watchWidgetFrame = 0;
   let watchWidgetTimer: ReturnType<typeof setInterval> | undefined;
   let watchWidgetTui: { requestRender: () => void } | undefined;
   let shuttingDown = false;
   let sidebar: SidebarReporter | undefined;
   const promptGate = createPromptGate();
+  const wakes = createWakeRouter({
+    events: pi.events,
+    sendMessage: (message, options) => pi.sendMessage(message, options),
+    isBusy: () => agentBusy,
+    createId: () => randomUUID(),
+  });
 
   const requestWatchWidgetRender = () => watchWidgetTui?.requestRender();
 
@@ -1058,11 +1104,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     client,
     appendEntry: (type, data) => pi.appendEntry(type, data),
     notify: (message, level) => currentContext?.ui.notify(message, level),
-    sendMessage: (message, options) => pi.sendMessage(message, options),
+    sendMessage: (message) => wakes.wake(message),
     promptGate: (input) =>
       input.kind === "agent_state" ? promptGate.gateFor(input.target) : undefined,
-    onLifecycle: (lifecycle, receipt) => {
-      coordination?.publishWatch(lifecycle, receipt);
+    onLifecycle: () => {
       sidebar?.changed();
       requestWatchWidgetRender();
     },
@@ -1085,15 +1130,11 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       );
       return;
     }
-    pi.sendMessage(
-      {
-        content: `Degraded Herdr ping fallback settled. Inspect the pane and receipt before continuing.\n\n${JSON.stringify(receipt)}`,
-        customType: "herdr-ping-wait",
-        details: receipt,
-        display: true,
-      },
-      { deliverAs: "followUp", triggerTurn: true },
-    );
+    wakes.wake({
+      content: `Degraded Herdr ping fallback settled. Inspect the pane and receipt before continuing.\n\n${JSON.stringify(receipt)}`,
+      customType: "herdr-ping-wait",
+      details: receipt,
+    });
   };
 
   const runPingWaitInput = async (
@@ -1402,7 +1443,14 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               watchTargetsScopedPane(watch, scopedPaneIds, scopedAgents),
             );
           const panes = capOverviewItems(scopedPanes);
-          const agents = capOverviewItems(scopedAgents);
+          const cappedAgents = capOverviewItems(scopedAgents);
+          const intercomSessions = await directory?.sessions();
+          const agents = {
+            ...cappedAgents,
+            values: cappedAgents.values.map((agent) =>
+              withIntercomIdentity(agent, intercomSessions),
+            ),
+          };
           const activeWatches = capOverviewItems(scopedActiveWatches);
           const currentPaneId = current ? stringField(current, "pane_id") : undefined;
           const lines = [
@@ -1416,7 +1464,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               : ["No scoped panes returned."]),
             `Agents: ${agents.counts.returned}/${agents.counts.total}`,
             ...(agents.values.length
-              ? agents.values.map(summarizeAgent)
+              ? agents.values.map(summarizeOverviewAgent)
               : ["No scoped agents returned."]),
             `Active watches: ${activeWatches.counts.returned}/${activeWatches.counts.total}`,
             ...(activeWatches.values.length
@@ -1445,6 +1493,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               current !== null && stringField(current, "workspace_id") === workspaceId,
             panes: panes.values,
             agents: agents.values,
+            intercom: intercomSessions ? "connected" : "unavailable",
             activeWatches: activeWatches.values,
             partialFailures,
             truncation: {
@@ -2110,6 +2159,15 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     promptGate.sweep("prompt call did not execute");
   });
 
+  // Wakes that settle during a run wait for it to end, then go out as one.
+  pi.on("agent_start", () => {
+    agentBusy = true;
+  });
+  pi.on("agent_end", () => {
+    agentBusy = false;
+    wakes.idle();
+  });
+
   pi.on("tool_result", (event) => {
     if (
       (event.toolName === "herdr_agent" || event.toolName === "herdr_layout") &&
@@ -2359,55 +2417,8 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       );
       if (warning) ctx.ui.notify(warning, "warning");
     }
-    if (!coordination) {
-      coordination = createIntercomCoordination({
-        events: pi.events,
-        sessionId: ctx.sessionManager.getSessionId(),
-        paneId: process.env.HERDR_PANE_ID,
-        activeWatches: () => watches.active(),
-        wake: (signal) => {
-          const details = {
-            eventId: signal.eventId,
-            sourceSessionId: signal.sourceSessionId,
-            watchId: signal.watchId,
-          };
-          pi.appendEntry("bellwether-intercom-wake-hint", details);
-          pi.sendMessage(
-            {
-              customType: "bellwether-intercom-wake",
-              content: "bellwether_intercom_wake",
-              display: false,
-              details,
-            },
-            { deliverAs: "followUp", triggerTurn: true },
-          );
-        },
-        onSignal: (signal) => {
-          // Presence chatter is not session evidence. Capability and binding
-          // announcements and reconciled-watch replays arrive from every peer on
-          // every reconcile; recording each one grew session files by hundreds
-          // of thousands of entries. Wake hints are already recorded by wake().
-          if (signal.kind === "capability" || signal.kind === "binding") return;
-          if (signal.kind === "wake_hint") return;
-          if (signal.kind === "watch" && signal.lifecycle === "reconciled") return;
-          pi.appendEntry(INTERCOM_SIGNAL_ENTRY_TYPE, {
-            eventId: signal.eventId,
-            kind: signal.kind,
-            sourceSessionId: signal.sourceSessionId,
-            ...(signal.kind === "workflow_receipt"
-              ? {
-                  workflowId: signal.workflowId,
-                  itemId: signal.itemId,
-                  generation: signal.generation,
-                  sequence: signal.sequence,
-                }
-              : {}),
-          });
-        },
-      });
-    } else {
-      coordination.announce();
-    }
+    // Read-only: registers to list live intercom peers and publishes nothing.
+    directory ??= createIntercomDirectory(pi.events);
     pi.appendEntry("bellwether-capability", {
       protocol: BELLWETHER_PROTOCOL,
       directSocket: true,
@@ -2421,9 +2432,12 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     watchWidgetTimer = undefined;
     currentContext?.ui.setWidget(WATCH_WIDGET_ID, undefined);
     watchWidgetTui = undefined;
-    coordination?.dispose();
-    coordination = undefined;
+    directory?.dispose();
+    directory = undefined;
     promptGate.sweep("session ended");
+    // Wakes that settled just before shutdown still reach the next run.
+    wakes.flush({ direct: true });
+    agentBusy = false;
     const stoppingSidebar = sidebar?.stop();
     sidebar = undefined;
 

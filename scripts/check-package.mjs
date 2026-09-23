@@ -15,6 +15,7 @@ const approved = [
   "src/prompt-gate.ts",
   "src/sidebar.ts",
   "src/suspension.ts",
+  "src/wake.ts",
   "src/watch.ts",
 ].sort();
 

@@ -2,17 +2,18 @@ import { describe, expect, test } from "vitest";
 
 import {
   BELLWETHER_INTERCOM_NAMESPACE,
-  createIntercomCoordination,
+  createIntercomDirectory,
   INTERCOM_EXTENSION_REGISTER_EVENT,
-  type BellwetherSignal,
-  type BellwetherWakeHint,
+  INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
+  piSessionIdFromAgent,
 } from "./intercom.ts";
-import type { WatchReceipt } from "./watch.ts";
 
 class FakeEvents {
+  readonly emitted: Array<{ event: string; payload: unknown }> = [];
   private readonly listeners = new Map<string, Array<(payload: unknown) => void>>();
 
   emit(event: string, payload: unknown) {
+    this.emitted.push({ event, payload });
     for (const listener of this.listeners.get(event) ?? []) listener(payload);
   }
 
@@ -37,249 +38,114 @@ interface Registration {
 }
 
 class FakeChannel {
-  readonly namespace = BELLWETHER_INTERCOM_NAMESPACE;
   connected = true;
   supported = true;
-  readonly published: unknown[] = [];
+  published = 0;
+  sessions: unknown[] = [
+    { id: "s-1", name: "reviewer", status: "idle", cwd: "/tmp", model: "m", pid: 1, startedAt: 0, lastActivity: 0 },
+    { id: 7 },
+  ];
+  listSessions: () => Promise<unknown[]> = async () => this.sessions;
 
   snapshot() {
     return { connected: this.connected, supported: this.supported };
   }
 
-  publish(payload: unknown, options?: unknown) {
-    this.published.push({ payload, options });
+  publish() {
+    this.published += 1;
   }
 }
 
-function payloads(channel: FakeChannel): BellwetherSignal[] {
-  return channel.published.map(
-    (entry) => (entry as { payload: BellwetherSignal }).payload,
-  );
+function connect(events: FakeEvents, channel = new FakeChannel()) {
+  const registration = events.emitted.find(
+    (entry) => entry.event === INTERCOM_EXTENSION_REGISTER_EVENT,
+  )?.payload as Registration | undefined;
+  if (!registration) throw new Error("directory did not register");
+  registration.onReady(channel);
+  return { registration, channel };
 }
 
-function watchReceipt(): WatchReceipt {
-  return {
-    id: "watch-1",
-    kind: "agent_state",
-    label: "worker",
-    status: "running",
-    phase: "running",
-    startedAt: new Date(0).toISOString(),
-    wake: "agent",
-    target: "worker",
-  };
-}
-
-function setup(options: {
-  activeWatches?: () => readonly WatchReceipt[];
-  wake?: (signal: BellwetherWakeHint) => void;
-  onSignal?: (signal: BellwetherSignal) => void;
-  createEventId?: () => string;
-} = {}) {
-  const events = new FakeEvents();
-  let registration: Registration | undefined;
-  events.on(INTERCOM_EXTENSION_REGISTER_EVENT, (payload) => {
-    registration = payload as Registration;
-  });
-  const adapter = createIntercomCoordination({
-    events,
-    sessionId: "session-a",
-    paneId: "w1:p1",
-    activeWatches: options.activeWatches ?? (() => []),
-    wake: options.wake ?? (() => undefined),
-    onSignal: options.onSignal,
-    createEventId: options.createEventId,
-  });
-  return { adapter, events, get registration() { return registration; } };
-}
-
-describe("optional pi-intercom extension-bus adapter", () => {
-  test("falls back cleanly when intercom is absent", () => {
+describe("intercom directory", () => {
+  test("registers a publish-free, non-owner namespace", () => {
     const events = new FakeEvents();
-    const adapter = createIntercomCoordination({
-      events,
-      sessionId: "session-a",
-      activeWatches: () => [],
-      wake: () => undefined,
-    });
+    createIntercomDirectory(events);
+    const { registration, channel } = connect(events);
+    expect(registration.namespace).toBe(BELLWETHER_INTERCOM_NAMESPACE);
+    expect(registration.ownerEligible).toBe(false);
 
-    expect(adapter.snapshot()).toEqual({ connected: false, supported: false });
-    expect(() => adapter.announce()).not.toThrow();
-    adapter.dispose();
+    registration.onEvent({ type: "connection", connected: true, supported: true });
+    registration.onEvent({ type: "session_joined", session: { id: "peer" } });
+    registration.onEvent({ type: "message", fromSessionId: "peer", payload: { kind: "wake_hint" } });
+    expect(channel.published).toBe(0);
   });
 
-  test("registers the real extension-bus strings, ownerEligible false, and path-free hints", () => {
-    let sequence = 0;
-    const setupResult = setup({ createEventId: () => `event-${++sequence}` });
-    const channel = new FakeChannel();
-    setupResult.registration?.onReady(channel);
-
-    expect(INTERCOM_EXTENSION_REGISTER_EVENT).toBe("intercom:extension-register");
-    expect(setupResult.registration).toMatchObject({
-      namespace: "bellwether/herdr/v1",
-      ownerEligible: false,
-    });
-    expect(payloads(channel)).toEqual([
-      expect.objectContaining({ kind: "capability", protocol: 1 }),
-      expect.objectContaining({ kind: "binding", paneId: "w1:p1" }),
+  test("returns live sessions with only id, name, and status", async () => {
+    const events = new FakeEvents();
+    const directory = createIntercomDirectory(events);
+    connect(events);
+    await expect(directory.sessions()).resolves.toEqual([
+      { id: "s-1", name: "reviewer", status: "idle" },
     ]);
-    expect(channel.published.every((entry) =>
-      JSON.stringify(entry).includes('"audience":"capable"'),
-    )).toBe(true);
-    const wire = JSON.stringify(channel.published);
-    expect(wire).not.toContain("prompt");
-    expect(wire).not.toContain("output");
-    expect(wire).not.toContain("transcript");
-    expect(wire).not.toContain("socketPath");
-    setupResult.adapter.dispose();
   });
 
-  test("publishes targeted wake and workflow receipt hints without conversational data", () => {
-    let sequence = 0;
-    const setupResult = setup({ createEventId: () => `event-${++sequence}` });
-    const channel = new FakeChannel();
-    setupResult.registration?.onReady(channel);
-    channel.published.splice(0);
+  test("returns undefined when absent, disconnected, failing, or slow", async () => {
+    const absent = createIntercomDirectory(new FakeEvents());
+    await expect(absent.sessions()).resolves.toBeUndefined();
 
-    setupResult.adapter.publishWake({
-      targetSessionId: "session-b",
-      targetPaneId: "w2:p1",
-      watchId: "watch-1",
-    });
-    setupResult.adapter.publishWorkflowReceipt({
-      targetSessionId: "session-b",
-      workflowId: "wf_1",
-      itemId: "item_1",
-      generation: 2,
-      sequence: 44,
-    });
+    const events = new FakeEvents();
+    const directory = createIntercomDirectory(events, 20);
+    const { channel } = connect(events);
+    channel.connected = false;
+    await expect(directory.sessions()).resolves.toBeUndefined();
 
-    expect(payloads(channel)).toEqual([
-      expect.objectContaining({
-        kind: "wake_hint",
-        targetSessionId: "session-b",
-        targetPaneId: "w2:p1",
-        watchId: "watch-1",
-      }),
-      expect.objectContaining({
-        kind: "workflow_receipt",
-        workflowId: "wf_1",
-        itemId: "item_1",
-        generation: 2,
-        sequence: 44,
-      }),
-    ]);
-    expect(JSON.stringify(channel.published)).not.toMatch(/prompt|output|transcript/);
-    expect(() => setupResult.adapter.publishWake({})).toThrow("requires a target");
-    setupResult.adapter.dispose();
-  });
-
-  test("wakes exactly once and rejects wrong-target, self, duplicate, and forged envelopes", () => {
-    const received: BellwetherSignal[] = [];
-    const wakes: BellwetherWakeHint[] = [];
-    const setupResult = setup({
-      wake: (signal) => wakes.push(signal),
-      onSignal: (signal) => received.push(signal),
-    });
-    setupResult.registration?.onReady(new FakeChannel());
-
-    const signal: BellwetherWakeHint = {
-      version: 1,
-      eventId: "hint-1",
-      sourceSessionId: "session-b",
-      targetSessionId: "session-a",
-      targetPaneId: "w1:p1",
-      kind: "wake_hint",
-      watchId: "watch-1",
+    channel.connected = true;
+    channel.listSessions = async () => {
+      throw new Error("broker gone");
     };
-    const deliver = (payload: BellwetherSignal, fromSessionId = "session-b") =>
-      setupResult.registration?.onEvent({
-        type: "message",
-        fromSessionId,
-        payload,
-      });
+    await expect(directory.sessions()).resolves.toBeUndefined();
 
-    deliver(signal);
-    deliver(signal);
-    deliver({ ...signal, eventId: "hint-2", targetSessionId: "someone-else" });
-    deliver({ ...signal, eventId: "hint-3", sourceSessionId: "session-a" }, "session-a");
-    deliver({ ...signal, eventId: "hint-4" }, "forged-session");
-
-    expect(wakes).toEqual([signal]);
-    expect(received).toEqual([signal]);
-    setupResult.adapter.dispose();
+    channel.listSessions = () => new Promise(() => {});
+    await expect(directory.sessions()).resolves.toBeUndefined();
   });
 
-  test("reconciles binding and active watches once per peer and on reconnect", () => {
-    let sequence = 0;
-    const setupResult = setup({
-      activeWatches: () => [watchReceipt()],
-      createEventId: () => `event-${++sequence}`,
-    });
-    const channel = new FakeChannel();
-    setupResult.registration?.onReady(channel);
-    channel.published.splice(0);
+  test("registers again when pi-intercom announces its registry late", () => {
+    const events = new FakeEvents();
+    createIntercomDirectory(events);
+    events.emit(INTERCOM_EXTENSION_REGISTRY_READY_EVENT, {});
+    const registrations = events.emitted.filter(
+      (entry) => entry.event === INTERCOM_EXTENSION_REGISTER_EVENT,
+    );
+    expect(registrations).toHaveLength(2);
+  });
 
-    setupResult.registration?.onEvent({
-      type: "session_joined",
-      session: { id: "session-b", name: "worker" },
-    });
-    setupResult.registration?.onEvent({
-      type: "presence_update",
-      session: { id: "session-c", status: "idle" },
-    });
-    setupResult.registration?.onEvent({ type: "session_left", sessionId: "session-b" });
-    setupResult.registration?.onEvent({
-      type: "connection",
-      connected: true,
-      supported: true,
-    });
+  test("dispose drops the channel", async () => {
+    const events = new FakeEvents();
+    const directory = createIntercomDirectory(events);
+    connect(events);
+    directory.dispose();
+    await expect(directory.sessions()).resolves.toBeUndefined();
+  });
+});
 
-    const signals = payloads(channel);
-    for (const target of ["session-b", "session-c"]) {
-      expect(signals).toContainEqual(
-        expect.objectContaining({ kind: "binding", targetSessionId: target }),
-      );
-      expect(signals).toContainEqual(
-        expect.objectContaining({
-          kind: "watch",
-          lifecycle: "reconciled",
-          targetSessionId: target,
-        }),
-      );
-    }
-    // join b, first presence c, reconnect broadcast. Leave republishes nothing.
-    expect(signals.filter((signal) => signal.kind === "watch")).toHaveLength(3);
-    expect(signals.filter((signal) => signal.kind === "binding")).toHaveLength(3);
+describe("piSessionIdFromAgent", () => {
+  test("reads the session id from Herdr's Pi session path", () => {
+    expect(
+      piSessionIdFromAgent({
+        agent_session: {
+          agent: "pi",
+          kind: "path",
+          source: "herdr:pi",
+          value: "/Users/x/.pi/agent/sessions/--proj--/2026-09-23T16-54-07-523Z_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl",
+        },
+      }),
+    ).toBe("01a0cf30-59a3-7224-8fe5-26bf174f82ad");
+  });
 
-    // Repeated presence from a known peer is status chatter, not a new peer.
-    const afterFirstRound = channel.published.length;
-    setupResult.registration?.onEvent({
-      type: "presence_update",
-      session: { id: "session-c", status: "working" },
-    });
-    setupResult.registration?.onEvent({
-      type: "presence_update",
-      session: { id: "session-c", status: "idle" },
-    });
-    setupResult.registration?.onEvent({ type: "session_left", sessionId: "session-c" });
-    expect(channel.published).toHaveLength(afterFirstRound);
-
-    // A peer that left and rejoined is announced again: capability, binding,
-    // and one reconciled watch.
-    setupResult.registration?.onEvent({
-      type: "presence_update",
-      session: { id: "session-c", status: "idle" },
-    });
-    expect(channel.published).toHaveLength(afterFirstRound + 3);
-    setupResult.adapter.dispose();
-
-    const before = channel.published.length;
-    setupResult.registration?.onEvent({
-      type: "connection",
-      connected: true,
-      supported: true,
-    });
-    expect(channel.published).toHaveLength(before);
+  test("ignores other agents and malformed paths", () => {
+    expect(piSessionIdFromAgent({})).toBeUndefined();
+    expect(
+      piSessionIdFromAgent({ agent_session: { agent: "claude", value: "/x/_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl" } }),
+    ).toBeUndefined();
+    expect(piSessionIdFromAgent({ agent_session: { agent: "pi", value: "/x/session.jsonl" } })).toBeUndefined();
   });
 });
