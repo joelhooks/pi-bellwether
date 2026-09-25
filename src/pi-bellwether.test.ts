@@ -1392,6 +1392,7 @@ describe("Herdr 0.7.5 action parity", () => {
     expect(result.details).toMatchObject({
       action: "start",
       ok: true,
+      readiness: { state: "proven", interactiveReady: true },
       proofOfLife: {
         status: "working",
         timeoutMs: 30_000,
@@ -1473,6 +1474,76 @@ describe("Herdr 0.7.5 action parity", () => {
       wait: { until: ["working"], timeout_ms: 30_000 },
     });
     expect(result.content[0]?.text).toContain("Proof of life");
+    expect(result.details).toMatchObject({
+      action: "start",
+      ok: true,
+      readiness: { state: "proven" },
+      proofOfLife: { status: "working", targetPaneId: "w1:p1" },
+    });
+  });
+
+  test("agent.start uses the readiness-gated prompt handshake for unverified harnesses", async () => {
+    const prompt = "Read this task: $HOME `literal`";
+    let readinessChecks = 0;
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.start") {
+        socket.end(
+          success(request, {
+            type: "agent_started",
+            agent: agentInfo({ launch_pending: true, interactive_ready: false }),
+            argv: ["gemini"],
+          }),
+        );
+      } else if (request.method === "agent.get") {
+        readinessChecks += 1;
+        socket.end(
+          success(request, {
+            type: "agent_info",
+            agent: agentInfo({
+              launch_pending: readinessChecks === 1,
+              interactive_ready: readinessChecks > 1,
+            }),
+          }),
+        );
+      } else if (request.method === "agent.prompt") {
+        socket.end(
+          success(request, {
+            type: "agent_prompted",
+            agent: agentInfo({ agent_status: "working", interactive_ready: true }),
+          }),
+        );
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-start",
+      {
+        action: "start",
+        name: "worker",
+        kind: "gemini",
+        pane: "w1:p1",
+        prompt,
+      },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.start",
+      "agent.get",
+      "agent.get",
+      "agent.get",
+      "agent.prompt",
+    ]);
+    expect(server.requests[0]?.params.args).toEqual([]);
+    expect(server.requests[4]?.params.text).toBe(prompt);
     expect(result.details).toMatchObject({
       action: "start",
       ok: true,

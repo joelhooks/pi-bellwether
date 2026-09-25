@@ -80,6 +80,7 @@ const MAX_ACTIVE_PING_WAITS = 32;
 const BELLWETHER_PROTOCOL = 1;
 const PROMPT_PROOF_OF_LIFE_TIMEOUT_MS = 30_000;
 const AGENT_READINESS_POLL_INTERVAL_MS = 100;
+const VERIFIED_POSITIONAL_PROMPT_KINDS = new Set(["pi", "claude", "codex"]);
 const FAILURE_DIAGNOSTIC_TIMEOUT_MS = 1_500;
 const FAILURE_EVIDENCE_MAX_BYTES = 2_048;
 const FAILURE_EVIDENCE_MAX_LINES = 12;
@@ -1881,7 +1882,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_agent",
     label: "Herdr Agent",
     description:
-      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds and reports readiness without guessing. For start, pass the first task in prompt; Bellwether launches, delivers, and returns proof only after Herdr observes working. Prompt submits once and waits up to 30 seconds for Herdr-observed working state, but does not wait for completion or start a watch. Failures include one bounded diagnostic at most. External-state observation belongs only in herdr_watch.",
+      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds and reports readiness without guessing. For start, pass the first task in prompt; verified harnesses receive it at launch, while other harnesses wait for readiness before delivery. Bellwether returns proof only after Herdr observes working. Prompt submits once and waits up to 30 seconds, but does not wait for completion or start a watch. Failures include one bounded diagnostic at most. External-state observation belongs only in herdr_watch.",
     promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
     parameters: herdrAgentParameters,
     async execute(toolCallId, params, signal) {
@@ -1910,7 +1911,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           }
           const initialPrompt = params.prompt || undefined;
           const promptIsArg =
-            initialPrompt !== undefined && !hasAgentArgumentControls(initialPrompt);
+            initialPrompt !== undefined &&
+            params.kind !== undefined &&
+            VERIFIED_POSITIONAL_PROMPT_KINDS.has(params.kind) &&
+            !hasAgentArgumentControls(initialPrompt);
           const proofStartedAtMs = promptIsArg ? Date.now() : undefined;
           if (initialPrompt) promptGate.announce(toolCallId, params.name);
           const serverTimeoutMs =
@@ -2081,7 +2085,11 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
             );
           }
           const agent = recordField(proof.result, "agent");
-          const readiness = readinessDetails(agent);
+          const readiness = {
+            ...readinessDetails(agent),
+            state: "proven" as const,
+            interactiveReady: true,
+          };
           promptGate.settle(toolCallId, {
             proven: true,
             paneId: proof.targetPaneId,
