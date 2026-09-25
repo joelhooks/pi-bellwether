@@ -75,7 +75,7 @@ Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and 
 
 `herdr_layout overview` lists each Pi agent's `piSessionId` and, when pi-intercom is connected, its intercom name and status (`intercom: null` means unreachable). Use that ID with `intercom send` to reach a worker directly. Give workers the owner's `PI_SESSION_ID` as their report-to address. A worker's intercom report is its claim; the watch receipt and the artifact remain the evidence.
 
-Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
+Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. A worker that reports over intercom turns its later idle/done watch match into a quiet receipt (`quiet: "reported"` in status), so it does not wake you twice; blocked, crashed, and timed-out targets still do. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
 
 ## Degraded fallback
 

@@ -15,6 +15,7 @@ import {
   type HerdrError,
   type HerdrResult,
 } from "./herdr-client.ts";
+import { piSessionIdFromAgent } from "./intercom.ts";
 import type { PromptGateOutcome } from "./prompt-gate.ts";
 
 export const MAX_ACTIVE_WATCHES = 32;
@@ -103,6 +104,11 @@ export interface WatchReceipt {
   readonly failure?: string;
   readonly code?: string;
   readonly result?: HerdrResult;
+  /**
+   * `reported`: the target's own Pi session messaged the owner before this
+   * idle/done match, so the match is a receipt, not news, and does not wake.
+   */
+  readonly quiet?: "reported";
 }
 
 interface WatchRecord {
@@ -117,6 +123,11 @@ interface WatchRecord {
   finishedAt?: number;
   result?: HerdrResult;
   status: WatchStatus;
+  /** The target's Pi session, learned from the liveness probe. */
+  targetSessionId?: string;
+  /** The target session messaged the owner after this watch started. */
+  reported?: boolean;
+  quiet?: "reported";
 }
 
 function defaultLabel(params: StartWatchParams): string {
@@ -218,6 +229,7 @@ function probeAgent(
   client: HerdrClient,
   input: WatchInput,
   intervalMs: number,
+  onObserved?: (agent: Extract<HerdrResult, { readonly type: "agent_info" }>["agent"]) => void,
 ): Effect.Effect<WatchOutcome, never> {
   if (input.kind !== "agent_state") return Effect.never;
 
@@ -249,6 +261,7 @@ function probeAgent(
             failure: "agent identity changed while the watch was active",
           };
         }
+        onObserved?.(current);
         expected ??= {
           terminalId: current.terminal_id,
           expectedName: current.name === input.target ? current.name : undefined,
@@ -262,6 +275,14 @@ function probeAgent(
       yield* Effect.sleep(intervalMs);
     }
   });
+}
+
+/** An idle or done agent: the kind of match a worker's own report already announced. */
+function isSettledAgentResult(result: HerdrResult | undefined): boolean {
+  return (
+    result?.type === "agent_info" &&
+    (result.agent.agent_status === "idle" || result.agent.agent_status === "done")
+  );
 }
 
 function terminalStatus(value: unknown): Exclude<WatchStatus, "running"> | undefined {
@@ -300,6 +321,9 @@ export function watchReceiptText(receipt: WatchReceipt): string {
   if (receipt.pane) lines.push(`Pane: ${receiptField(receipt.pane)}`);
   if (receipt.finishedAt) lines.push(`Finished: ${receipt.finishedAt}`);
   if (receipt.code) lines.push(`Code: ${receiptField(receipt.code)}`);
+  if (receipt.quiet === "reported") {
+    lines.push("Quiet: the target's session reported before this match; no wake was sent.");
+  }
   if (receipt.failure) lines.push(`Failure: ${receiptField(receipt.failure)}`);
 
   const result = receipt.result;
@@ -401,7 +425,11 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         const controller = new AbortController();
         let disposed = false;
         void Effect.runPromise(
-          probeAgent(options.client, input, agentProbeIntervalMs),
+          probeAgent(options.client, input, agentProbeIntervalMs, (agent) => {
+            const record = activeRecords.get(input.id);
+            const sessionId = piSessionIdFromAgent(agent);
+            if (record && sessionId) record.targetSessionId = sessionId;
+          }),
           { signal: controller.signal },
         ).then(
           (outcome) => {
@@ -579,6 +607,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
       failure: record.failure,
       code: record.code,
       result: record.result,
+      ...(record.quiet ? { quiet: record.quiet } : {}),
     };
   };
 
@@ -603,6 +632,9 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     record.failure = actorFailure ?? snapshot.context.failure ?? record.failure;
     record.code = snapshot.context.code ?? record.code;
     record.result = snapshot.context.result ?? record.result;
+    if (record.reported && status === "matched" && isSettledAgentResult(record.result)) {
+      record.quiet = "reported";
+    }
 
     const receipt = toReceipt(record);
     activeRecords.delete(record.input.id);
@@ -624,7 +656,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     }
 
     options.appendEntry?.("bellwether-herdr-watch-finished", receipt);
-    if (receipt.wake === "silent") return;
+    if (receipt.wake === "silent" || receipt.quiet) return;
     if (receipt.wake === "notify") {
       options.notify?.(
         `${receipt.label}: ${receipt.status}`,
@@ -702,6 +734,20 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     },
     bumpGeneration() {
       generation += 1;
+    },
+    /**
+     * The Pi session `sessionId` messaged the owner. Active agent_state watches on
+     * that session will record a later idle/done match quietly. Returns the count.
+     */
+    noteReportFrom(sessionId: string): number {
+      let marked = 0;
+      for (const record of activeRecords.values()) {
+        if (record.input.kind === "agent_state" && record.targetSessionId === sessionId) {
+          record.reported = true;
+          marked += 1;
+        }
+      }
+      return marked;
     },
     cancel(id: string): WatchReceipt {
       const record = activeRecords.get(id);

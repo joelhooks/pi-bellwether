@@ -134,6 +134,26 @@ describe("wake router", () => {
     expect(sent).toHaveLength(1);
   });
 
+  test("withdraw drops a held wake by key and leaves the rest", () => {
+    const { router, sent } = setup({ busy: true });
+    router.wake({ ...message("a"), key: "a" });
+    router.wake({ ...message("b"), key: "b" });
+    expect(router.withdraw("a")).toBe(true);
+    expect(router.withdraw("missing")).toBe(false);
+    router.flush();
+    expect(sent).toHaveLength(1);
+    expect((sent[0]?.message as { content: string }).content).toBe("watch b matched");
+  });
+
+  test("withdrawing the last held wake sends nothing", () => {
+    const { router, sent } = setup({ busy: true });
+    router.wake({ ...message("a"), key: "a" });
+    router.withdraw("a");
+    router.flush();
+    vi.advanceTimersByTime(20_000);
+    expect(sent).toHaveLength(0);
+  });
+
   test("a direct flush bypasses pi-until during shutdown", () => {
     const { router, sent, emitted } = setup({ accept: true, busy: true });
     router.wake(message("a"));

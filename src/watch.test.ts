@@ -12,6 +12,7 @@ import {
   type StartWatchParams,
   type WatchInput,
   type WatchReceipt,
+  watchReceiptText,
 } from "./watch.ts";
 import { HerdrApiError } from "./herdr-client.ts";
 import type { PromptGateOutcome } from "./prompt-gate.ts";
@@ -350,6 +351,78 @@ describe("Herdr watch XState lifecycle", () => {
         { mode: "tui" },
       ),
     ).toThrow(`at most ${MAX_ACTIVE_WATCHES}`);
+    await registry.shutdown();
+  });
+});
+
+describe("watches superseded by the target's own report", () => {
+  const SESSION = "11111111-2222-4333-8444-555555555555";
+  const agentSession = {
+    source: "herdr:pi",
+    agent: "pi",
+    kind: "path",
+    value: `/x/.pi/agent/sessions/--p--/2026-09-25T00-00-00-000Z_${SESSION}.jsonl`,
+  };
+
+  async function setup(finalStatus: string) {
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const server = await startFakeHerdrServer(async (request, socket) => {
+      if (request.method === "agent.wait") {
+        await released;
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: finalStatus, agent_session: agentSession }) }));
+        return;
+      }
+      socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working", agent_session: agentSession }) }));
+    });
+    servers.push(server);
+    const messages: unknown[] = [];
+    const registry = createWatchRegistry({
+      client: createHerdrClient({ socketPath: server.socketPath }),
+      agentProbeIntervalMs: 60_000,
+      sendMessage(message) {
+        messages.push(message);
+      },
+    });
+    const started = registry.start({ kind: "agent_state", target: "worker" }, { mode: "tui" });
+    // The first liveness probe records the target's Pi session.
+    const deadline = Date.now() + 1_000;
+    while (!server.requests.some((request) => request.method === "agent.get") && Date.now() < deadline) await sleep(2);
+    await sleep(10);
+    return { registry, started, messages, release };
+  }
+
+  test("a done match after the target reported is a quiet receipt", async () => {
+    const { registry, started, messages, release } = await setup("done");
+    expect(registry.noteReportFrom(SESSION)).toBe(1);
+    release();
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt).toMatchObject({ status: "matched", quiet: "reported" });
+    expect(messages).toHaveLength(0);
+    expect(watchReceiptText(receipt)).toContain("reported before this match");
+    await registry.shutdown();
+  });
+
+  test("a blocked match still wakes even after a report", async () => {
+    const { registry, started, messages, release } = await setup("blocked");
+    registry.noteReportFrom(SESSION);
+    release();
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt.status).toBe("matched");
+    expect(receipt.quiet).toBeUndefined();
+    expect(messages).toHaveLength(1);
+    await registry.shutdown();
+  });
+
+  test("a report from another session changes nothing", async () => {
+    const { registry, started, messages, release } = await setup("done");
+    expect(registry.noteReportFrom("99999999-2222-4333-8444-555555555555")).toBe(0);
+    release();
+    const receipt = await waitForTerminal(() => registry.status(started.id));
+    expect(receipt.quiet).toBeUndefined();
+    expect(messages).toHaveLength(1);
     await registry.shutdown();
   });
 });

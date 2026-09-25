@@ -26,7 +26,7 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 
 Register `bellwether/directory/v1` through `pi.events` with `ownerEligible: false`, only to read pi-intercom's live session list for `herdr_layout overview`. Never publish on the bus and never record bus traffic. Do not statically import pi-intercom at runtime.
 
-Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly.
+Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. An inbound `intercom_message` from a watched target's Pi session marks its agent-state watches reported; a later idle/done match is a quiet receipt, never a wake. Cancel withdraws a held wake by watch id.
 
 ## Public tools
 

@@ -1104,7 +1104,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     client,
     appendEntry: (type, data) => pi.appendEntry(type, data),
     notify: (message, level) => currentContext?.ui.notify(message, level),
-    sendMessage: (message) => wakes.wake(message),
+    sendMessage: (message) => wakes.wake({ ...message, key: message.details.id }),
     promptGate: (input) =>
       input.kind === "agent_state" ? promptGate.gateFor(input.target) : undefined,
     onLifecycle: () => {
@@ -2128,6 +2128,9 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         params.action === "cancel"
           ? watches.cancel(params.id)
           : watches.status(params.id);
+      // A watch that matched moments before the cancel may still have its wake
+      // held behind the owner's current run. The owner is done with it.
+      if (params.action === "cancel") wakes.withdraw(params.id);
       return toolText(watchReceiptText(receipt), receipt);
     },
   });
@@ -2136,7 +2139,19 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   // and message_end precedes all of them. Announce prompts here so a watch from
   // the same message gates on proof of life whatever order the calls run in.
   pi.on("message_end", (event) => {
-    const message = event.message as { role?: unknown; content?: unknown };
+    const message = event.message as {
+      role?: unknown;
+      content?: unknown;
+      customType?: unknown;
+      details?: unknown;
+    };
+    // A worker's own intercom report already told the owner; its later idle or
+    // done state match becomes a quiet receipt instead of a second wake.
+    if (message.role === "custom" && message.customType === "intercom_message") {
+      const from = isRecord(message.details) ? message.details.from : undefined;
+      if (isRecord(from) && typeof from.id === "string") watches.noteReportFrom(from.id);
+      return;
+    }
     if (message.role !== "assistant" || !Array.isArray(message.content)) return;
     for (const part of message.content) {
       if (!isRecord(part) || part.type !== "toolCall" || part.name !== "herdr_agent") continue;

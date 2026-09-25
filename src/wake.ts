@@ -23,6 +23,8 @@ export interface WakeMessage {
   readonly customType: string;
   readonly content: string;
   readonly details: unknown;
+  /** Lets the owner withdraw a held wake, e.g. the watch id. Never sent to Pi. */
+  readonly key?: string;
 }
 
 /** Version 1 request accepted by pi-until's follow-up arbiter. */
@@ -58,12 +60,17 @@ export interface WakeRouter {
    * stopping during the same session shutdown and would drop the request.
    */
   readonly flush: (mode?: { readonly direct?: boolean }) => void;
+  /** Drop one held wake by key. True when a wake was dropped. */
+  readonly withdraw: (key: string) => boolean;
   /** Drop timers and held wakes without delivering. */
   readonly dispose: () => void;
 }
 
 function combine(messages: readonly WakeMessage[]): WakeMessage {
-  if (messages.length === 1) return messages[0] as WakeMessage;
+  if (messages.length === 1) {
+    const { key: _key, ...message } = messages[0] as WakeMessage;
+    return message;
+  }
   return {
     customType: BELLWETHER_WAKES_CUSTOM_TYPE,
     content: [
@@ -153,6 +160,13 @@ export function createWakeRouter(options: WakeRouterOptions): WakeRouter {
       if (pending.length > 0) scheduleSettle();
     },
     flush,
+    withdraw(key) {
+      const before = pending.length;
+      pending = pending.filter((message) => message.key !== key);
+      if (pending.length === before) return false;
+      if (pending.length === 0) clearTimers();
+      return true;
+    },
     dispose() {
       clearTimers();
       pending = [];

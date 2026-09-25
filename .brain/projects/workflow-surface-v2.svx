@@ -68,6 +68,14 @@ The broadcast is gone: capability, binding, watch lifecycle, wake hints, and wor
 
 We did not need an upstream pi-intercom change. Herdr already records a Pi pane's session file as `agent_session.value`. The filename ends in the Pi session ID, and pi-intercom uses the same ID (`PI_INTERCOM_SESSION_ID == PI_SESSION_ID`, checked 2026-09-23). `herdr_layout overview` adds `piSessionId` per Pi agent. With intercom connected, it adds `intercom: { name, status }`, or `null` when the session is unreachable.
 
+## Slice 6: reported watches stay quiet (1.5.0, 2026-09-25)
+
+Joel: "i get a lot of these", meaning watch wakes the owner answers with "already verified … the workflow is closed." Across fleet session files for 36 hours, 124 of 217 watch wakes were no-ops (at most one tool call and a short reply). Before 67 of them, the target had already sent the owner an intercom message. Before 15, a harvest or workflow close had already run. Several were races with a cancel.
+
+Fix: the liveness probe records the target's Pi session (`piSessionIdFromAgent`). An inbound `intercom_message` from that session marks the watch reported. A later idle/done match finishes as `matched` with `quiet: "reported"`: receipt and lifecycle only, no wake. Blocked, target-gone, timeout, and failure still wake the owner, because a report does not cover them. Cancel also withdraws a wake still held in the router (`WakeRouter.withdraw`, keyed by watch id).
+
+Not covered yet: owners that learn the outcome by reading the pane or harvesting without an intercom report. Measure again after a week before adding harvest awareness.
+
 ## Fleet rollout (2026-09-23)
 
 - pi-until PR #5 merged as `eff388f` by `shitratgit[bot]`.

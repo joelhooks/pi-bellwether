@@ -708,6 +708,77 @@ describe("Bellwether public surface", () => {
     }
   });
 
+  test("a worker's intercom report quiets its later done match", async () => {
+    const session = "11111111-2222-4333-8444-555555555555";
+    const agentSession = { source: "herdr:pi", agent: "pi", kind: "path", value: `/x/2026-09-25T00-00-00-000Z_${session}.jsonl` };
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const server = await startFakeHerdrServer(async (request, socket) => {
+      if (request.method === "agent.wait") {
+        await released;
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "done", agent_session: agentSession }) }));
+        return;
+      }
+      socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working", agent_session: agentSession }) }));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+
+    try {
+      const started = await watch.execute("w", { action: "start", kind: "agent_state", target: "worker" }, undefined, undefined, context());
+      await vi.waitFor(() => expect(server.requests.map((request) => request.method)).toContain("agent.get"));
+      await sleep(20);
+      await handlers.get("message_end")?.({
+        type: "message_end",
+        message: { role: "custom", customType: "intercom_message", details: { from: { id: session } } },
+      });
+      release();
+      const id = (started.details as { id: string }).id;
+      await vi.waitFor(async () => {
+        const status = await watch.execute("s", { action: "status", id }, undefined, undefined, context());
+        expect(status.details).toMatchObject({ status: "matched", quiet: "reported" });
+      });
+      await sleep(400);
+      expect(messages).toHaveLength(0);
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
+  test("cancelling a watch drops its wake if it is still held", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+
+    try {
+      await handlers.get("agent_start")?.({ type: "agent_start" });
+      const started = await watch.execute("w", { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE" }, undefined, undefined, context());
+      const id = (started.details as { id: string }).id;
+      await vi.waitFor(async () => {
+        const status = await watch.execute("s", { action: "status", id }, undefined, undefined, context());
+        expect(status.details).toMatchObject({ status: "matched" });
+      });
+      await watch.execute("c", { action: "cancel", id }, undefined, undefined, context());
+      await handlers.get("agent_end")?.({ type: "agent_end" });
+      await sleep(400);
+      expect(messages).toHaveLength(0);
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
   test("wakes go through pi-until's arbiter when it accepts them", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       socket.end(success(request, resultForMethod(request.method)));

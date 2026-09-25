@@ -81,6 +81,8 @@ Watch and degraded ping-wait settlements wake the agent through one router (`src
 - A held wake is delayed at most five minutes if an `agent_end` is missed. It is never dropped.
 - Bellwether first offers the follow-up to pi-until's session arbiter on `pi-until:follow-up`. When pi-until accepts, it serializes the wake with its own follow-ups and Pi receives `details: { followUpId, receipt }`. Otherwise Bellwether sends the follow-up directly.
 - Session shutdown delivers held wakes directly, because pi-until may be stopping its queue in the same shutdown.
+- A worker's own intercom report supersedes its state watch. Each agent-state watch learns the target's Pi session from its liveness probe. If that session messages the owner after the watch starts, a later `idle` or `done` match is recorded as a quiet receipt (`quiet: "reported"`) and does not wake the agent. `blocked`, `targetGone`, `timedOut`, and failures still wake it. On 2026-09-25, 124 of 217 fleet watch wakes in 36 hours were no-ops, most after the worker had already reported.
+- Cancelling a watch withdraws its wake if the wake is still held behind the current run.
 
 ## Pi intercom
 
