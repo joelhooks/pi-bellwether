@@ -1,11 +1,12 @@
 /**
- * Orders `herdr_agent prompt` before `agent_state` watches from the same turn.
+ * Orders `herdr_agent prompt` and initial start prompts before same-turn
+ * `agent_state` watches.
  *
  * Pi runs tool calls in parallel by default, and Herdr `agent.wait` returns at
  * once when the agent already sits in a requested state. A watch that races its
  * own prompt therefore matches the previous task's leftover idle state. The
- * extension announces every prompt call when the assistant message ends, before
- * any tool executes, so a watch can wait for that prompt's proof of life.
+ * extension announces every prompted start or prompt call when the assistant
+ * message ends, before any tool executes, so a watch can wait for proof of life.
  */
 
 export interface PromptProofSummary {

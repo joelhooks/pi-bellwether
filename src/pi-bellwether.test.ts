@@ -578,6 +578,77 @@ describe("Bellwether public surface", () => {
     }
   });
 
+  test("a watch in the same message as a start prompt waits for proof of life", async () => {
+    let releaseStart: () => void = () => {};
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const server = await startFakeHerdrServer(async (request, socket) => {
+      if (request.method === "agent.start") {
+        await startGate;
+        socket.end(
+          success(request, {
+            type: "agent_started",
+            agent: agentInfo({ agent_status: "working", interactive_ready: true }),
+            argv: ["pi", "go"],
+          }),
+        );
+        return;
+      }
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers } = harness();
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const agent = tools.get("herdr_agent");
+    const watch = tools.get("herdr_watch");
+    if (!agent || !watch) throw new Error("required tools missing");
+
+    await handlers.get("message_end")?.({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-watch", name: "herdr_watch", arguments: { action: "start", kind: "agent_state", target: "worker" } },
+          { type: "toolCall", id: "call-start", name: "herdr_agent", arguments: { action: "start", name: "worker", kind: "pi", pane: "w1:p1", prompt: "go" } },
+        ],
+      },
+    });
+
+    try {
+      const started = await watch.execute(
+        "call-watch",
+        { action: "start", kind: "agent_state", target: "worker", wake: "silent" },
+        undefined,
+        undefined,
+        context(),
+      );
+      expect(started.details).toMatchObject({ phase: "gated" });
+      const launching = agent.execute(
+        "call-start",
+        { action: "start", name: "worker", kind: "pi", pane: "w1:p1", prompt: "go" },
+        undefined,
+        undefined,
+        context(),
+      );
+      await vi.waitFor(() =>
+        expect(server.requests.map((request) => request.method)).toContain("agent.start"),
+      );
+      await sleep(20);
+      expect(server.requests.map((request) => request.method)).not.toContain("agent.wait");
+
+      releaseStart();
+      await launching;
+      await vi.waitFor(() =>
+        expect(server.requests.map((request) => request.method)).toContain("agent.wait"),
+      );
+    } finally {
+      releaseStart();
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
   test("reports sidebar wait metadata only while a watch is active", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       if (request.method === "pane.wait_for_output") return;
@@ -1261,6 +1332,153 @@ describe("Herdr 0.7.5 action parity", () => {
   test("agent.start gives Herdr its deadline and the socket a transport grace", () => {
     expect(agentStartClientTimeoutMs()).toBe(35_000);
     expect(agentStartClientTimeoutMs(8_000)).toBe(13_000);
+  });
+
+  test("agent.start passes a long shell-sensitive initial prompt as one argument and proves working", async () => {
+    const prompt = `Read $HOME's config and preserve \`literal\` text. ${"long prompt ".repeat(10_000)}`;
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.start") {
+        socket.end(
+          success(request, {
+            type: "agent_started",
+            agent: agentInfo({ launch_pending: false, interactive_ready: true }),
+            argv: ["pi", "--model", "openai-codex/gpt-6-luna:max"],
+          }),
+        );
+      } else if (request.method === "agent.wait") {
+        socket.end(
+          success(request, {
+            type: "agent_info",
+            agent: agentInfo({ agent_status: "working" }),
+          }),
+        );
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-start",
+      {
+        action: "start",
+        name: "worker",
+        kind: "pi",
+        pane: "w1:p1",
+        agentArgs: ["--model", "openai-codex/gpt-6-luna:max"],
+        prompt,
+      },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests[0]?.params.args).toEqual([
+      "--model",
+      "openai-codex/gpt-6-luna:max",
+      prompt,
+    ]);
+    expect(server.requests[1]).toMatchObject({
+      method: "agent.wait",
+      params: { target: "w1:p1", until: ["working"] },
+    });
+    const timeoutMs = server.requests[1]?.params.timeout_ms;
+    expect(timeoutMs).toBeGreaterThan(0);
+    expect(timeoutMs).toBeLessThanOrEqual(30_000);
+    expect(result.content[0]?.text).toContain("Proof of life");
+    expect(result.details).toMatchObject({
+      action: "start",
+      ok: true,
+      proofOfLife: {
+        status: "working",
+        timeoutMs: 30_000,
+        recoveredAfterStall: false,
+        alreadyWorking: false,
+        targetPaneId: "w1:p1",
+      },
+    });
+  });
+
+  test("agent.start delivers multiline initial prompts without putting control characters in argv", async () => {
+    const prompt = "Read this exactly:\n$HOME `literal`\nKeep both lines.";
+    let readinessChecks = 0;
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.start") {
+        socket.end(
+          success(request, {
+            type: "agent_started",
+            agent: agentInfo({ launch_pending: true, interactive_ready: false }),
+            argv: ["pi", "--model", "openai-codex/gpt-6-luna:max"],
+          }),
+        );
+      } else if (request.method === "agent.get") {
+        readinessChecks += 1;
+        socket.end(
+          success(request, {
+            type: "agent_info",
+            agent: agentInfo({
+              launch_pending: readinessChecks === 1,
+              interactive_ready: readinessChecks > 1,
+            }),
+          }),
+        );
+      } else if (request.method === "agent.prompt") {
+        socket.end(
+          success(request, {
+            type: "agent_prompted",
+            agent: agentInfo({ agent_status: "working", interactive_ready: true }),
+          }),
+        );
+      } else {
+        socket.end(success(request, resultForMethod(request.method)));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const agent = harness().tools.get("herdr_agent");
+    if (!agent) throw new Error("herdr_agent missing");
+
+    const result = await agent.execute(
+      "call-start",
+      {
+        action: "start",
+        name: "worker",
+        kind: "pi",
+        pane: "w1:p1",
+        agentArgs: ["--model", "openai-codex/gpt-6-luna:max"],
+        prompt,
+      },
+      undefined,
+      undefined,
+      context(),
+    );
+
+    expect(server.requests.map((request) => request.method)).toEqual([
+      "agent.start",
+      "agent.get",
+      "agent.get",
+      "agent.get",
+      "agent.prompt",
+    ]);
+    expect(server.requests[0]?.params.args).toEqual([
+      "--model",
+      "openai-codex/gpt-6-luna:max",
+    ]);
+    expect(server.requests[4]?.params).toMatchObject({
+      target: "w1:p1",
+      text: prompt,
+      wait: { until: ["working"], timeout_ms: 30_000 },
+    });
+    expect(result.content[0]?.text).toContain("Proof of life");
+    expect(result.details).toMatchObject({
+      action: "start",
+      ok: true,
+      readiness: { state: "proven" },
+      proofOfLife: { status: "working", targetPaneId: "w1:p1" },
+    });
   });
 
   test("agent.prompt returns a structured proof-of-life receipt", async () => {

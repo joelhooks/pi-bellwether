@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -78,6 +79,7 @@ import {
 const MAX_ACTIVE_PING_WAITS = 32;
 const BELLWETHER_PROTOCOL = 1;
 const PROMPT_PROOF_OF_LIFE_TIMEOUT_MS = 30_000;
+const AGENT_READINESS_POLL_INTERVAL_MS = 100;
 const FAILURE_DIAGNOSTIC_TIMEOUT_MS = 1_500;
 const FAILURE_EVIDENCE_MAX_BYTES = 2_048;
 const FAILURE_EVIDENCE_MAX_LINES = 12;
@@ -217,7 +219,12 @@ export const herdrAgentParameters = Type.Object(
     name: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" })),
     kind: Type.Optional(AgentKindEnum),
     agentArgs: Type.Optional(Type.Array(Type.String())),
-    prompt: Type.Optional(Type.String({ maxLength: 900_000 })),
+    prompt: Type.Optional(
+      Type.String({
+        maxLength: 900_000,
+        description: "For start, the worker's initial prompt; for prompt, submit to an existing agent.",
+      }),
+    ),
     timeoutSeconds: Type.Optional(
       Type.Integer({
         minimum: 4,
@@ -654,6 +661,57 @@ async function runRequest(
   );
   if (!outcome.ok) throw requestFailure(outcome.error);
   return outcome.result;
+}
+
+function hasAgentArgumentControls(value: string): boolean {
+  return /[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function argsWithInitialPrompt(agentArgs: readonly string[], prompt: string): string[] {
+  const args = [...agentArgs];
+  if (prompt.startsWith("-") && !args.includes("--")) args.push("--");
+  args.push(prompt);
+  return args;
+}
+
+async function waitForAgentInteractiveReadiness(
+  client: HerdrClient,
+  target: string,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<HerdrResult> {
+  const startedAtMs = Date.now();
+  while (true) {
+    const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAtMs));
+    if (remainingMs === 0) {
+      throw requestFailure(
+        new HerdrTimeoutError({
+          operation: "agent.start readiness",
+          timeoutMs,
+          message: `agent.start readiness timed out after ${timeoutMs}ms`,
+        }),
+      );
+    }
+    const result = await runRequest(
+      client,
+      {
+        method: "agent.get",
+        params: { target },
+        timeoutMs: Math.min(remainingMs, DEFAULT_REQUEST_TIMEOUT_MS),
+      },
+      signal,
+    );
+    const agent = recordField(result, "agent");
+    if (booleanField(agent, "interactive_ready") === true) return result;
+    if (booleanField(agent, "launch_pending") !== true) {
+      throw new Error("agent exited before becoming interactive");
+    }
+    await sleep(
+      Math.min(AGENT_READINESS_POLL_INTERVAL_MS, remainingMs),
+      undefined,
+      signal ? { signal } : undefined,
+    );
+  }
 }
 
 async function waitForPromptProof(
@@ -1823,7 +1881,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     name: "herdr_agent",
     label: "Herdr Agent",
     description:
-      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds and reports readiness without guessing. Prompt submits once and waits up to 30 seconds for Herdr-observed working state as proof of life, but does not wait for completion or start a watch. Failures include one bounded diagnostic at most. External-state observation belongs only in herdr_watch.",
+      "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds and reports readiness without guessing. For start, pass the first task in prompt; Bellwether launches, delivers, and returns proof only after Herdr observes working. Prompt submits once and waits up to 30 seconds for Herdr-observed working state, but does not wait for completion or start a watch. Failures include one bounded diagnostic at most. External-state observation belongs only in herdr_watch.",
     promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
     parameters: herdrAgentParameters,
     async execute(toolCallId, params, signal) {
@@ -1850,6 +1908,11 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           if (!params.name || !params.kind || !params.pane) {
             throw new Error("name, kind, and pane are required for start");
           }
+          const initialPrompt = params.prompt || undefined;
+          const promptIsArg =
+            initialPrompt !== undefined && !hasAgentArgumentControls(initialPrompt);
+          const proofStartedAtMs = promptIsArg ? Date.now() : undefined;
+          if (initialPrompt) promptGate.announce(toolCallId, params.name);
           const serverTimeoutMs =
             params.timeoutSeconds === undefined
               ? undefined
@@ -1865,7 +1928,10 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
                   name: params.name,
                   kind: params.kind,
                   pane_id: params.pane,
-                  args: params.agentArgs ?? [],
+                  args:
+                    promptIsArg && initialPrompt !== undefined
+                      ? argsWithInitialPrompt(params.agentArgs ?? [], initialPrompt)
+                      : params.agentArgs ?? [],
                   ...(serverTimeoutMs === undefined ? {} : { timeout_ms: serverTimeoutMs }),
                 },
                 timeoutMs: agentStartClientTimeoutMs(serverTimeoutMs),
@@ -1886,6 +1952,14 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               state: requestWritten ? "uncertain" as const : "not_submitted" as const,
             };
             const resolvedIdentity = { paneId: params.pane };
+            if (initialPrompt) {
+              promptGate.settle(toolCallId, {
+                proven: false,
+                paneId: params.pane,
+                agentName: params.name,
+                reason: `start: ${primaryError.code ?? primaryError.message}`,
+              });
+            }
             return toolFailure(
               agentFailureText({
                 label: "Agent start failed",
@@ -1906,16 +1980,126 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               },
             );
           }
-          const agent = recordField(result, "agent");
+          const startedAgent = recordField(result, "agent");
+          const launchReadiness = readinessDetails(startedAgent);
+          if (!initialPrompt) {
+            return toolText(
+              launchReadiness.state === "proven"
+                ? `Started ${summarizeAgent(startedAgent)}; interactive readiness proven.`
+                : `Launch submitted for ${summarizeAgent(startedAgent)}; interactive readiness unknown.`,
+              {
+                action: params.action,
+                ok: true,
+                readiness: launchReadiness,
+                agent: startedAgent,
+              },
+            );
+          }
+
+          let proof: Awaited<ReturnType<typeof runPromptWithProofOfLife>>;
+          try {
+            if (promptIsArg) {
+              const identity = resolvedPaneIdentity(startedAgent);
+              proof =
+                stringField(startedAgent, "agent_status") === "working"
+                  ? {
+                      result,
+                      recoveredAfterStall: false,
+                      alreadyWorking: false,
+                      targetPaneId: identity.paneId,
+                    }
+                  : await waitForPromptProof(
+                      client,
+                      identity.paneId,
+                      identity,
+                      proofStartedAtMs ?? Date.now(),
+                      false,
+                      false,
+                      signal,
+                    );
+            } else {
+              const identity = resolvedPaneIdentity(startedAgent);
+              if (booleanField(startedAgent, "interactive_ready") !== true) {
+                await waitForAgentInteractiveReadiness(
+                  client,
+                  identity.paneId,
+                  serverTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+                  signal,
+                );
+              }
+              proof = await runPromptWithProofOfLife(
+                client,
+                params.name,
+                initialPrompt,
+                signal,
+              );
+            }
+          } catch (error) {
+            const failure =
+              error instanceof AgentControlFailure
+                ? error
+                : new AgentControlFailure({
+                    stage: "proof_of_life",
+                    error,
+                    operation: "agent.start proof of life",
+                    resolvedIdentity: resolvedPaneIdentity(startedAgent),
+                    submission: "submitted",
+                    aborted: signal?.aborted,
+                  });
+            const resolvedIdentity =
+              failure.resolvedIdentity ?? { paneId: params.pane };
+            promptGate.settle(toolCallId, {
+              proven: false,
+              paneId: resolvedIdentity.paneId,
+              agentName: params.name,
+              reason: `${failure.stage}: ${failure.primaryError.code ?? failure.primaryError.message}`,
+            });
+            const diagnostic = await failureDiagnostic(
+              client,
+              resolvedIdentity.paneId,
+              signal,
+            );
+            return toolFailure(
+              `Agent launched, but its initial prompt was not proven.\n${agentFailureText({
+                label: "Agent start prompt failed",
+                primaryError: failure.primaryError,
+                stage: failure.stage,
+                resolvedIdentity,
+                submission: failure.submission,
+                diagnostic,
+              })}`,
+              {
+                action: params.action,
+                ok: false,
+                stage: failure.stage,
+                primaryError: failure.primaryError,
+                resolvedIdentity,
+                submission: failure.submission,
+                diagnostic,
+                launch: { submitted: true, agent: startedAgent },
+              },
+            );
+          }
+          const agent = recordField(proof.result, "agent");
           const readiness = readinessDetails(agent);
+          promptGate.settle(toolCallId, {
+            proven: true,
+            paneId: proof.targetPaneId,
+            agentName: stringField(agent, "name"),
+          });
           return toolText(
-            readiness.state === "proven"
-              ? `Started ${summarizeAgent(agent)}; interactive readiness proven.`
-              : `Launch submitted for ${summarizeAgent(agent)}; interactive readiness unknown.`,
+            `Started ${summarizeAgent(startedAgent)}; interactive readiness ${readiness.state}. Proof of life from ${summarizeAgent(agent)}.`,
             {
               action: params.action,
               ok: true,
               readiness,
+              proofOfLife: {
+                status: stringField(agent, "agent_status"),
+                timeoutMs: PROMPT_PROOF_OF_LIFE_TIMEOUT_MS,
+                recoveredAfterStall: proof.recoveredAfterStall,
+                alreadyWorking: proof.alreadyWorking,
+                targetPaneId: proof.targetPaneId,
+              },
               agent,
             },
           );
@@ -2156,14 +2340,20 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     for (const part of message.content) {
       if (!isRecord(part) || part.type !== "toolCall" || part.name !== "herdr_agent") continue;
       const args = part.arguments;
+      if (typeof part.id !== "string" || !isRecord(args)) continue;
+      const target =
+        args.action === "prompt"
+          ? args.target
+          : args.action === "start"
+            ? args.name
+            : undefined;
       if (
-        typeof part.id === "string" &&
-        isRecord(args) &&
-        args.action === "prompt" &&
-        typeof args.target === "string" &&
-        args.target.trim()
+        typeof target === "string" &&
+        target.trim() &&
+        typeof args.prompt === "string" &&
+        args.prompt.length > 0
       ) {
-        promptGate.announce(part.id, args.target);
+        promptGate.announce(part.id, target);
       }
     }
   });
