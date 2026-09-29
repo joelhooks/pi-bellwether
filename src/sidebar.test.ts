@@ -10,6 +10,7 @@ import {
 } from "./sidebar.ts";
 import {
   agentInfo,
+  workspaceInfo,
   paneInfo,
   resultForMethod,
   startFakeHerdrServer,
@@ -121,8 +122,12 @@ describe("sidebar tokens", () => {
 });
 
 describe("sidebar reporter", () => {
-  async function server() {
+  async function server(spaceTokens?: Record<string, string>) {
     const fake = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "workspace.list") {
+        socket.end(success(request, { type: "workspace_list", workspaces: [workspaceInfo(spaceTokens ? { tokens: spaceTokens } : {})] }));
+        return;
+      }
       if (request.method === "pane.get") {
         socket.end(success(request, { type: "pane_info", pane: paneInfo({ pane_id: "w1:p1" }) }));
         return;
@@ -226,6 +231,22 @@ describe("sidebar reporter", () => {
       expect(seqs[index]).toBeGreaterThan(seqs[index - 1] ?? 0);
     }
     await reporter.stop();
+  });
+
+  test("leaves a managed space's agents and needs to its project manager", async () => {
+    const fake = await server({ progress: "🐑 1/2 lanes" });
+    const reporter = createSidebarReporter({
+      client: createHerdrClient({ socketPath: fake.socketPath }),
+      paneId: "w1:p1",
+      watches: () => [receipt()],
+      now: () => NOW,
+      debounceMs: 1,
+    });
+    reporter.changed();
+    await vi.waitFor(() => expect(fake.requests.map((request) => request.method)).toContain("workspace.list"));
+    await reporter.stop();
+    expect(fake.requests.map((request) => request.method)).toContain("pane.report_metadata");
+    expect(fake.requests.map((request) => request.method)).not.toContain("workspace.report_metadata");
   });
 
   test("stop clears a published wait token once", async () => {

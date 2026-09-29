@@ -10,7 +10,9 @@ import type { WatchReceipt } from "./watch.ts";
  * workspace: the last writer wins and any source's clear removes the token.
  * Bellwether therefore clears only its own pane's `$wait`, and leaves the shared
  * workspace tokens `$agents` and `$needs` to expire through their lease.
- * `$progress` belongs to herdr-workflow.
+ * `$progress` belongs to a project manager (Muster, herdr-workflow). A space
+ * that carries it has an owner that publishes its own `$agents` and `$needs`,
+ * so Bellwether leaves that space's tokens alone.
  */
 export const SIDEBAR_SOURCE = "user:bellwether.v1";
 export const SIDEBAR_TTL_MS = 3 * 60_000;
@@ -172,6 +174,12 @@ export function createSidebarReporter(options: SidebarReporterOptions): SidebarR
       ttl_ms: SIDEBAR_TTL_MS,
     });
     waitPublished = true;
+    const spaces = await request("workspace.list", {});
+    const space = spaces.workspaces.find((workspace) => workspace.workspace_id === pane.workspace_id);
+    if (space?.tokens?.progress) {
+      schedule(refreshMs);
+      return;
+    }
     const listed = await request("agent.list", {});
     const scoped = listed.agents.filter((agent) => agent.workspace_id === pane.workspace_id);
     await request("workspace.report_metadata", {
