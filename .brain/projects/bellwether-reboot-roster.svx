@@ -1,0 +1,51 @@
+---
+title: "Bellwether session reboot roster (2026-09-29)"
+type: "project"
+status: "active"
+created_at: "2026-09-29"
+privacy: "private"
+tags:
+  - reboot
+  - roster
+  - herdr
+---
+
+# Bellwether session reboot roster
+
+Written for the Pi janitor session (01a0ea75) before the planned reboot (earliest window after about 01:30Z on 2026-09-29). One row for this session and one for the pane it spawned.
+
+| Pane | Role | Pi session file | cwd | State | Commit | Clean |
+|---|---|---|---|---|---|---|
+| `wA6:p1` | 🐏 Bellwether Intercom Until Herdr (this session) | `~/.pi/agent/sessions/--Users-joel-Code-joelhooks-pi-bellwether--/2026-09-23T16-54-07-523Z_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl` | `~/Code/joelhooks/pi-bellwether` | parked (blocked on Joel) | pi-bellwether `eb5e327`, dark-wizard `e3cd45c` | yes |
+| `w71:p2V` | 💬 drovr desk (spawned by this session) | `~/.pi/agent/sessions/--Users-joel-Code-badass-courses-drovr--/2026-09-25T17-02-15-478Z_01a0d984-83b6-7346-8ff2-c18f28b248be.jsonl` | `~/Code/badass-courses/drovr` | parked (Joel's live drovr lane) | writes no code | yes |
+
+## Restore commands
+
+This session:
+
+```bash
+cd ~/Code/joelhooks/pi-bellwether && pi --session ~/.pi/agent/sessions/--Users-joel-Code-joelhooks-pi-bellwether--/2026-09-23T16-54-07-523Z_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl
+```
+
+drovr desk, which needs its environment variable and extension. A plain `pi --session` restore silently loses the desk-queue digest:
+
+```bash
+cd ~/Code/badass-courses/drovr && HERDR_DESK_PROJECT=drovr pi -e ~/Code/joelhooks/dark-wizard/herdr/desk/desk-queue.ts --model claude-bridge/claude-opus-5-5 --thinking high --session ~/.pi/agent/sessions/--Users-joel-Code-badass-courses-drovr--/2026-09-25T17-02-15-478Z_01a0d984-83b6-7346-8ff2-c18f28b248be.jsonl
+```
+
+If Herdr restores the desk pane automatically, quit it and relaunch with the command above in the same `💬 desk` tab of the drovr space.
+
+## What to tell each on resume
+
+This session: "Resume after reboot. Run `/herdr-resume` and `/until-resume` if prompted. Open items, all waiting on Joel or on a gap:"
+
+1. Jev gold set: Joel picks the keep standard, strict or lenient. Then rerun `.workroom/jev-memory-verifier/fable-gold.mjs` in dark-wizard with that exact wording, freeze it, and rerun Jev's threshold sweep. See `~/.brain/projects/jev-memory-verifier-spike.svx`, "Gold calls".
+2. drovr reorganization: the Judge becomes ⚖️ arbiter and takes the deploy gate from Hawk at a gap between Hawk's deploy windows. Hawk also passes the intercom rule to lanes. The log is in `~/.brain/projects/herdr-project-spaces.svx`.
+3. The wrap-up reply from Seeding (`w71:pH`, session `01a0b0a1`) is still outstanding. The two drovr panes claiming "migration owner" are for the desk to resolve.
+4. The old space-cleanup waves (sessions `01a0abcc`, `01a0ad9c`, `01a0b00c`, `01a0b0c5`, `01a0b243`, `01a0b24e`) are superseded by the reboot janitor's sweep. Do not re-send them.
+
+drovr desk: "Resume as 💬 drovr desk after the reboot. Re-read `~/.brain/projects/herdr-project-spaces.svx`, orient from drovr's Brain and `herdr_layout overview` of the drovr space, and wait for Joel. Your queue cursor is in this session."
+
+## Not this session's
+
+`pi-until` sits on `docs/fail-closed-conditions`, and the shared `pi-claude-bridge` checkout on `fix/mid-turn-compaction` with an `opus-5-5` worktree. Both belong to other sessions. Leave them.
