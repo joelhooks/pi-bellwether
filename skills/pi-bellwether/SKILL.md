@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Pi Bellwether 🐏🔔
 
-Bellwether owns generic Herdr control. `herdr-workflow` owns durable workflow truth.
+Bellwether owns generic Herdr control. Project workflow (lanes, catalog rows, packets, landing, the desk) belongs to Muster 🐑 (`muster` skill); `herdr-workflow` owns its durable control-plane truth.
 
 ## Flow
 
@@ -65,7 +65,7 @@ While the session owns an active watch and runs in a Herdr pane, Bellwether publ
 - workspace `$agents`: counts of the other agents by state;
 - workspace `$needs`: blocked agent names, cleared when nothing is blocked.
 
-It makes no Herdr request while no watch is active. `$progress` belongs to `herdr-workflow`.
+It makes no Herdr request while no watch is active. `$progress` belongs to the project owner (Muster or `herdr-workflow`).
 
 ## Close guard
 
@@ -73,7 +73,7 @@ Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and 
 
 ## Intercom and wakes
 
-`herdr_layout overview` lists each Pi agent's `piSessionId` and, when pi-intercom is connected, its intercom name and status (`intercom: null` means unreachable). Use that ID with `intercom send` to reach a worker directly. Give workers the owner's `PI_SESSION_ID` as their report-to address. A worker's intercom report is its claim; the watch receipt and the artifact remain the evidence.
+`herdr_layout overview` lists each Pi agent's `piSessionId` and, when pi-intercom is connected, its intercom name and status (`intercom: null` means unreachable). Use that ID with `intercom send` to reach a session directly. Report-to addresses and what counts as evidence are Muster's policy, not Bellwether's.
 
 Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. A worker that reports over intercom turns its later idle/done watch match into a quiet receipt (`quiet: "reported"` in status), so it does not wake you twice; blocked, crashed, and timed-out targets still do. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
 
