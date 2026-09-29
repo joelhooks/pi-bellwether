@@ -16,7 +16,7 @@ Written for the Pi janitor session (01a0ea75) before the planned reboot (earlies
 
 | Pane | Role | Pi session file | cwd | State | Commit | Clean |
 |---|---|---|---|---|---|---|
-| `wA6:p1` | 🐏 Bellwether Intercom Until Herdr (this session) | `~/.pi/agent/sessions/--Users-joel-Code-joelhooks-pi-bellwether--/2026-09-23T16-54-07-523Z_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl` | `~/Code/joelhooks/pi-bellwether` | parked (blocked on Joel) | pi-bellwether `eb5e327`, dark-wizard `e3cd45c` | yes |
+| `wA6:p1` | 🐏 Bellwether Intercom Until Herdr (this session) | `~/.pi/agent/sessions/--Users-joel-Code-joelhooks-pi-bellwether--/2026-09-23T16-54-07-523Z_01a0cf30-59a3-7224-8fe5-26bf174f82ad.jsonl` | `~/Code/joelhooks/pi-bellwether` | finished-harvested; pane closed 2026-09-29 at Joel's request | pi-bellwether `main`, dark-wizard `be50872` | yes |
 | `w71:p2V` | 💬 drovr desk (spawned by this session) | `~/.pi/agent/sessions/--Users-joel-Code-badass-courses-drovr--/2026-09-25T17-02-15-478Z_01a0d984-83b6-7346-8ff2-c18f28b248be.jsonl` | `~/Code/badass-courses/drovr` | parked (Joel's live drovr lane) | writes no code | yes |
 
 ## Restore commands
@@ -34,6 +34,15 @@ cd ~/Code/badass-courses/drovr && HERDR_DESK_PROJECT=drovr pi -e ~/Code/joelhook
 ```
 
 If Herdr restores the desk pane automatically, quit it and relaunch with the command above in the same `💬 desk` tab of the drovr space.
+
+## Update 2026-09-29: this session is closed
+
+Joel chose the lenient keep standard and asked this session to wrap up and close its pane. Items 1 and 2 below are resolved or handed off:
+
+- Jev: lenient is recorded, and the ten `gold-blind-v1` calls are the frozen gold set. The sweep result and the next step are in `~/.brain/projects/jev-memory-verifier-spike.svx`.
+- drovr: the 💬 desk owns the rest of the reorganization, as recorded in `~/.brain/projects/herdr-project-spaces.svx`.
+
+The drovr desk row and its restore command below still apply. Nothing needs to resume this session; to read its history, use the restore command.
 
 ## What to tell each on resume
 
