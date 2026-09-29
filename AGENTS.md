@@ -28,6 +28,10 @@ Register `bellwether/directory/v1` through `pi.events` with `ownerEligible: fals
 
 Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. An inbound `intercom_message` from a watched target's Pi session marks its agent-state watches reported; a later idle/done match is a quiet receipt, never a wake. Cancel withdraws a held wake by watch id.
 
+## Library exports
+
+`package.json` `exports` lets downstream packages (Muster 🐑) import the generic modules as a library: `herdr-client`, `intercom`, `sidebar`, `wake`, and `watch`. Each maps to its `src/*.ts` file, which `files` already ships. Keep those modules free of product policy; a downstream package imports them and never the extension file. Bellwether never imports a downstream package. Changing an exported signature is a breaking change for Muster.
+
 ## Public tools
 
 - `herdr_layout`
