@@ -26,6 +26,8 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 
 Register `bellwether/directory/v1` through `pi.events` with `ownerEligible: false`, only to read pi-intercom's live session list for `herdr_layout overview`. Never publish on the bus and never record bus traffic. Do not statically import pi-intercom at runtime.
 
+Bellwether subscribes to `bellwether/pane-close/v1` at extension load without I/O or publishing. The payload is `{ paneId: string, terminalId?: string, reason: string, reply?: (result: { retired: string[] }) => void }`. Match local watches by stable pane ID, resolved named-agent pane, or terminal ID. Cancel active (including gated) matches through the watch registry with `pane closed by owner: <reason>` and withdraw held wakes; already-settled matches are retired only when their wake is still held. Reply synchronously with retired IDs. Ignore malformed payloads and log only a payload-free debug message. Delivered wakes cannot be recalled.
+
 Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. An inbound `intercom_message` from a watched target's Pi session marks its agent-state watches reported; a later idle/done match is a quiet receipt, never a wake. Cancel withdraws a held wake by watch id.
 
 ## Library exports

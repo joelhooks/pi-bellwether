@@ -84,6 +84,23 @@ Watch and degraded ping-wait settlements wake the agent through one router (`src
 - A worker's own intercom report supersedes its state watch. Each agent-state watch learns the target's Pi session from its liveness probe. If that session messages the owner after the watch starts, a later `idle` or `done` match is recorded as a quiet receipt (`quiet: "reported"`) and does not wake the agent. `blocked`, `targetGone`, `timedOut`, and failures still wake it. On 2026-09-25, 124 of 217 fleet watch wakes in 36 hours were no-ops, most after the worker had already reported.
 - Cancelling a watch withdraws its wake if the wake is still held behind the current run.
 
+## Intercom and wakes
+
+An owner closing a pane can emit `bellwether/pane-close/v1` on `pi.events`:
+
+```ts
+{
+  paneId: string,
+  terminalId?: string,
+  reason: string,
+  reply?: (result: { retired: string[] }) => void
+}
+```
+
+Bellwether subscribes at extension load but performs no I/O until a watch starts. It never publishes this event. The listener cancels matching local active watches, including gated watches, and withdraws held wakes. Matching uses the stable pane ID, a named agent's observed pane ID, or the optional terminal ID after pane renumbering. Pane-output watches resolve their terminal identity once; agent-state watches learn it from their existing liveness probe. A gated pane target can match directly before any probe runs.
+
+The retained receipt is `cancelled` with `failure: "pane closed by owner: <reason>"`; cancellation does not wake. If a watch already settled as `targetGone` (or another terminal status), it is retired only when its wake is still held. Already-delivered wakes cannot be recalled. `reply` receives `{ retired }` synchronously. Invalid payloads are ignored with a payload-free debug log.
+
 ## Pi intercom
 
 Bellwether reads pi-intercom; it does not publish on it. It registers `bellwether/directory/v1` with `ownerEligible: false` only to list live intercom sessions.

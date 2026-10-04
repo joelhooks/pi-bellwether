@@ -1113,6 +1113,35 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     },
   });
 
+  // Inert at load: only an owner's explicit close retires local watches.
+  pi.events.on("bellwether/pane-close/v1", (payload: unknown) => {
+    if (
+      !isRecord(payload) ||
+      typeof payload.paneId !== "string" || !payload.paneId.trim() ||
+      typeof payload.reason !== "string" || !payload.reason.trim() ||
+      (payload.terminalId !== undefined &&
+        (typeof payload.terminalId !== "string" || !payload.terminalId.trim())) ||
+      (payload.reply !== undefined && typeof payload.reply !== "function")
+    ) {
+      console.debug("Bellwether ignored malformed bellwether/pane-close/v1 payload");
+      return;
+    }
+    const retired: string[] = [];
+    for (const receipt of watches.list()) {
+      if (
+        receipt.targetPaneId !== payload.paneId &&
+        receipt.pane !== payload.paneId &&
+        receipt.target !== payload.paneId &&
+        !(payload.terminalId !== undefined && receipt.targetTerminalId === payload.terminalId)
+      ) continue;
+      const withdrawn = wakes.withdraw(receipt.id);
+      if (receipt.status !== "running" && !withdrawn) continue;
+      watches.cancel(receipt.id, `pane closed by owner: ${payload.reason}`);
+      retired.push(receipt.id);
+    }
+    payload.reply?.({ retired });
+  });
+
   const finishPingWait = (
     record: PingWaitRecord,
     status: Exclude<PingWaitStatus, "running">,

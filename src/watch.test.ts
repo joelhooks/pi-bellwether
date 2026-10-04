@@ -205,7 +205,7 @@ describe("Herdr watch XState lifecycle", () => {
       { kind: "pane_output", pane: "w1:p1", match: "DONE", wake: "agent" },
       { mode: "tui" },
     );
-    while (server.requests.length === 0) await sleep(1);
+    while (server.requests.length < 2) await sleep(1);
     expect(server.requests[0]?.params).toMatchObject({
       source: "recent_unwrapped",
       match: { type: "substring", value: "DONE" },
@@ -214,10 +214,11 @@ describe("Herdr watch XState lifecycle", () => {
     const cancelled = registry.cancel(started.id);
     expect(cancelled.status).toBe("cancelled");
     const deadline = Date.now() + 1_000;
-    while (server.closedConnections() === 0 && Date.now() < deadline) {
+    while (server.closedConnections() < 2 && Date.now() < deadline) {
       await sleep(1);
     }
-    expect(server.closedConnections()).toBe(1);
+    expect(server.connections()).toBe(2); // wait plus pane identity resolution
+    expect(server.closedConnections()).toBe(2);
     expect(messages).toHaveLength(0);
     await registry.shutdown();
   });
@@ -235,16 +236,16 @@ describe("Herdr watch XState lifecycle", () => {
       { kind: "pane_output", pane: "w1:p2", match: "DONE", wake: "agent" },
       { mode: "tui" },
     );
-    while (server.requests.length < 2) await sleep(1);
+    while (server.requests.length < 4) await sleep(1);
 
     await registry.shutdown();
     const deadline = Date.now() + 1_000;
-    while (server.closedConnections() < 2 && Date.now() < deadline) {
+    while (server.closedConnections() < 4 && Date.now() < deadline) {
       await sleep(1);
     }
 
-    expect(server.connections()).toBe(3);
-    expect(server.closedConnections()).toBe(3);
+    expect(server.connections()).toBe(4);
+    expect(server.closedConnections()).toBe(4);
     expect(messages).toHaveLength(0);
   });
 
