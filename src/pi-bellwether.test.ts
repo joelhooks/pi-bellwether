@@ -399,7 +399,7 @@ describe("Bellwether public surface", () => {
 
   test("suspends a direct watch on reload and resumes it once", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
-      if (server.requests.length >= 2) {
+      if (request.method === "pane.get" || server.requests.filter((r) => r.method === "pane.wait_for_output").length >= 2) {
         socket.end(success(request, resultForMethod(request.method)));
       }
     });
@@ -425,24 +425,25 @@ describe("Bellwether public surface", () => {
       undefined,
       firstContext,
     );
-    await vi.waitFor(() => expect(server.requests).toHaveLength(1));
+    await vi.waitFor(() => expect(server.requests).toHaveLength(2));
     await first.handlers.get("session_shutdown")?.({ reason: "reload" });
 
     const notifications: string[] = [];
     const second = harness(branch);
     const secondContext = context(branch, notifications);
     await second.handlers.get("session_start")?.({ reason: "reload" }, secondContext);
-    await vi.waitFor(() => expect(server.requests).toHaveLength(2));
+    await vi.waitFor(() => expect(server.requests).toHaveLength(4));
     await vi.waitFor(() => expect(second.messages).toHaveLength(1));
 
-    expect(server.requests[1]).toMatchObject({
+    const resumedWait = server.requests.filter((r) => r.method === "pane.wait_for_output")[1];
+    expect(resumedWait).toMatchObject({
       method: "pane.wait_for_output",
       params: {
         pane_id: "w1:p1",
         timeout_ms: expect.any(Number),
       },
     });
-    expect((server.requests[1]?.params.timeout_ms as number)).toBeLessThan(60_000);
+    expect((resumedWait?.params.timeout_ms as number)).toBeLessThan(60_000);
     expect(second.messages[0]).toMatchObject({
       customType: "bellwether-herdr-watch",
       details: {
@@ -619,10 +620,10 @@ describe("Bellwether public surface", () => {
       context(),
     );
     await vi.waitFor(() =>
-      expect(server.requests.at(-1)).toMatchObject({
+      expect(server.requests).toContainEqual(expect.objectContaining({
         method: "pane.report_metadata",
-        params: { tokens: { wait: null } },
-      }),
+        params: expect.objectContaining({ tokens: { wait: null } }),
+      })),
     );
     await handlers.get("session_shutdown")?.();
   });
@@ -749,6 +750,80 @@ describe("Bellwether public surface", () => {
     } finally {
       await handlers.get("session_shutdown")?.();
     }
+  });
+
+  test.each([
+    { label: "resolved named agent", target: "worker", paneId: "w1:p1" },
+    { label: "terminal identity after renumbering", target: "worker", paneId: "w9:p9", terminalId: "term-1" },
+    { label: "pane output terminal identity", target: "w1:p1", paneId: "w9:p9", terminalId: "term-1", paneOutput: true },
+    { label: "gated pane", target: "w1:p1", paneId: "w1:p1", gated: true },
+    { label: "held targetGone", target: "worker", paneId: "w1:p1", gone: true },
+  ])("owner pane close retires $label without waking", async ({ target, paneId, terminalId, gated, gone, paneOutput }) => {
+    let settleGone: () => void = () => {};
+    const goneGate = new Promise<void>((resolve) => { settleGone = resolve; });
+    const server = await startFakeHerdrServer(async (request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working" }) }));
+      } else if (request.method === "pane.get") {
+        socket.end(success(request, { type: "pane_info", pane: paneInfo({ pane_id: request.params.pane_id, terminal_id: request.params.pane_id === "w1:p1" ? "term-1" : "term-other" }) }));
+      } else if (gone && request.method === "agent.wait") {
+        await goneGate;
+        socket.end(failure(request, "agent_not_found", "closed"));
+      }
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages, events } = harness();
+    const watch = tools.get("herdr_watch")!;
+    const run = (params: Record<string, unknown>) => watch.execute("w", params, undefined, undefined, context());
+    await handlers.get("agent_start")?.({ type: "agent_start" });
+    if (gated) await handlers.get("message_end")?.({
+      message: { role: "assistant", content: [{ type: "toolCall", id: "prompt-close", name: "herdr_agent", arguments: { action: "prompt", target, prompt: "work" } }] },
+    });
+    try {
+      const started = await run(paneOutput
+        ? { action: "start", kind: "pane_output", pane: target, match: "DONE" }
+        : { action: "start", kind: "agent_state", target, until: ["blocked"] });
+      const other = await run({ action: "start", kind: "pane_output", pane: "w2:p2", match: "DONE" });
+      const id = (started.details as WatchReceipt).id;
+      if (gated) expect(started.details).toMatchObject({ phase: "gated" });
+      else await vi.waitFor(async () => {
+        expect((await run({ action: "status", id })).details).toMatchObject({ targetPaneId: "w1:p1", targetTerminalId: "term-1" });
+      });
+      if (gone) {
+        settleGone();
+        await vi.waitFor(async () => expect((await run({ action: "status", id })).details).toMatchObject({ status: "targetGone" }));
+      }
+      const also = await run({ action: "start", kind: "pane_output", pane: paneId, match: "DONE" });
+      const alsoId = (also.details as WatchReceipt).id;
+      const reply = vi.fn();
+      events.emit("bellwether/pane-close/v1", { paneId, terminalId, reason: "packet landed", reply });
+      expect(reply).toHaveBeenCalledExactlyOnceWith({ retired: [id, alsoId] });
+      expect((await run({ action: "status", id: alsoId })).details).toMatchObject({ status: "cancelled", failure: "pane closed by owner: packet landed" });
+      expect((await run({ action: "status", id })).details).toMatchObject({ status: "cancelled", failure: "pane closed by owner: packet landed" });
+      expect((await run({ action: "status", id: (other.details as WatchReceipt).id })).details).toMatchObject({ status: "running" });
+      await handlers.get("agent_end")?.({ type: "agent_end" });
+      await sleep(300);
+      expect(messages).toHaveLength(0);
+    } finally {
+      settleGone();
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
+  test("malformed pane-close payloads are ignored without replies or I/O", () => {
+    const { events, messages, entries } = harness();
+    const reply = vi.fn();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      for (const payload of [null, {}, { paneId: "", reason: "close", reply }, { paneId: "p", reason: 2, reply }, { paneId: "p", reason: "close", terminalId: 2, reply }, { paneId: "p", reason: "close", reply: 2 }]) {
+        events.emit("bellwether/pane-close/v1", payload);
+      }
+      expect(reply).not.toHaveBeenCalled();
+      expect(debug).toHaveBeenCalledTimes(6);
+      expect(messages).toHaveLength(0);
+      expect(entries).toHaveLength(0);
+    } finally { debug.mockRestore(); }
   });
 
   test("cancelling a watch drops its wake if it is still held", async () => {

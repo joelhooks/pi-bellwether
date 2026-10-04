@@ -109,6 +109,9 @@ export interface WatchReceipt {
    * idle/done match, so the match is a receipt, not news, and does not wake.
    */
   readonly quiet?: "reported";
+  /** Stable identity observed by the watch, including named-agent targets. */
+  readonly targetPaneId?: string;
+  readonly targetTerminalId?: string;
 }
 
 interface WatchRecord {
@@ -125,6 +128,8 @@ interface WatchRecord {
   status: WatchStatus;
   /** The target's Pi session, learned from the liveness probe. */
   targetSessionId?: string;
+  targetPaneId?: string;
+  targetTerminalId?: string;
   /** The target session messaged the owner after this watch started. */
   reported?: boolean;
   quiet?: "reported";
@@ -425,11 +430,29 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         const controller = new AbortController();
         let disposed = false;
         void Effect.runPromise(
-          probeAgent(options.client, input, agentProbeIntervalMs, (agent) => {
-            const record = activeRecords.get(input.id);
-            const sessionId = piSessionIdFromAgent(agent);
-            if (record && sessionId) record.targetSessionId = sessionId;
-          }),
+          input.kind === "pane_output"
+            ? options.client.request({ method: "pane.get", params: { pane_id: input.pane } }).pipe(
+                Effect.match({
+                  onFailure: () => undefined,
+                  onSuccess: (result) => {
+                    const record = activeRecords.get(input.id);
+                    if (record && result.type === "pane_info") {
+                      record.targetPaneId = result.pane.pane_id;
+                      record.targetTerminalId = result.pane.terminal_id;
+                    }
+                  },
+                }),
+                Effect.andThen(Effect.never),
+              )
+            : probeAgent(options.client, input, agentProbeIntervalMs, (agent) => {
+                const record = activeRecords.get(input.id);
+                const sessionId = piSessionIdFromAgent(agent);
+                if (record) {
+                  if (sessionId) record.targetSessionId = sessionId;
+                  record.targetPaneId = agent.pane_id;
+                  record.targetTerminalId = agent.terminal_id;
+                }
+              }),
           { signal: controller.signal },
         ).then(
           (outcome) => {
@@ -607,6 +630,8 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
       failure: record.failure,
       code: record.code,
       result: record.result,
+      targetPaneId: record.targetPaneId,
+      targetTerminalId: record.targetTerminalId,
       ...(record.quiet ? { quiet: record.quiet } : {}),
     };
   };
@@ -749,9 +774,19 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
       }
       return marked;
     },
-    cancel(id: string): WatchReceipt {
+    cancel(id: string, reason?: string): WatchReceipt {
       const record = activeRecords.get(id);
-      if (!record) return receiptFor(id);
+      if (!record) {
+        const receipt = receiptFor(id);
+        if (reason !== undefined) {
+          const cancelled: WatchReceipt = { ...receipt, status: "cancelled", failure: reason };
+          terminalReceipts.set(id, cancelled);
+          options.onLifecycle?.("cancelled", cancelled);
+          return cancelled;
+        }
+        return receipt;
+      }
+      record.failure = reason;
       record.actor.send({ type: "CANCEL" });
       return receiptFor(id);
     },
