@@ -250,22 +250,22 @@ const ErrorEnvelope = Schema.Struct({
   error: Schema.Struct({ code: Schema.String, message: Schema.String }),
 });
 
-export class HerdrTransportError extends Schema.TaggedErrorClass<HerdrTransportError>()(
+export class HerdrTransportError extends Schema.TaggedError<HerdrTransportError>()(
   "HerdrTransportError",
   { operation: Schema.String, message: Schema.String },
 ) {}
 
-export class HerdrProtocolError extends Schema.TaggedErrorClass<HerdrProtocolError>()(
+export class HerdrProtocolError extends Schema.TaggedError<HerdrProtocolError>()(
   "HerdrProtocolError",
   { operation: Schema.String, message: Schema.String },
 ) {}
 
-export class HerdrApiError extends Schema.TaggedErrorClass<HerdrApiError>()(
+export class HerdrApiError extends Schema.TaggedError<HerdrApiError>()(
   "HerdrApiError",
   { operation: Schema.String, code: Schema.String, message: Schema.String },
 ) {}
 
-export class HerdrTimeoutError extends Schema.TaggedErrorClass<HerdrTimeoutError>()(
+export class HerdrTimeoutError extends Schema.TaggedError<HerdrTimeoutError>()(
   "HerdrTimeoutError",
   { operation: Schema.String, timeoutMs: Schema.Number, message: Schema.String },
 ) {}

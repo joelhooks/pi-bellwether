@@ -76,7 +76,7 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.99",
+    "effect": "4.0.1",
     "xstate": "5.32.5"
   }
 }
