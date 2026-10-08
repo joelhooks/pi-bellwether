@@ -14,7 +14,7 @@ import {
   type WatchReceipt,
   watchReceiptText,
 } from "./watch.ts";
-import { HerdrApiError } from "./herdr-client.ts";
+import { HerdrApiError, HerdrTransportError } from "./herdr-client.ts";
 import type { PromptGateOutcome } from "./prompt-gate.ts";
 import {
   agentInfo,
@@ -61,6 +61,53 @@ async function waitForTerminal(
 }
 
 describe("Herdr watch XState lifecycle", () => {
+  test("custom socket routes agent wait and probes without touching the local server", async () => {
+    const local = await startFakeHerdrServer((request, socket) => {
+      socket.end(failure(request, "agent_not_found", "local cannot see target"));
+    });
+    const remote = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working" }) }));
+      } else {
+        setTimeout(() => socket.end(success(request, {
+          type: "agent_info", agent: agentInfo({ agent_status: "done" }),
+        })), 20);
+      }
+    });
+    servers.push(local, remote);
+    const registry = registryFor(local);
+    try {
+      const started = registry.start({ kind: "agent_state", target: "worker", socketPath: remote.socketPath, wake: "silent" }, {});
+      const terminal = await waitForTerminal(() => registry.status(started.id));
+      expect(terminal.status).toBe("matched");
+      expect(terminal.socketPath).toBe(remote.socketPath);
+      expect(watchReceiptText(terminal)).toContain(`Socket: ${remote.socketPath}`);
+      expect(registry.list()[0]?.socketPath).toBe(remote.socketPath);
+      expect(remote.requests.map((r) => r.method).sort()).toEqual(["agent.get", "agent.wait"]);
+      expect(local.requests).toEqual([]);
+      expect(remote.requests.every((r) => !("socketPath" in r.params))).toBe(true);
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
+  test("missing custom forward fails rather than reporting a dead target", async () => {
+    const local = await startFakeHerdrServer((request, socket) => { socket.end(failure(request, "agent_not_found", "wrong server")); });
+    servers.push(local);
+    const registry = registryFor(local);
+    try {
+      const socketPath = `${local.socketPath}.missing`;
+      const started = registry.start({ kind: "agent_state", target: "worker", socketPath, wake: "silent" }, {});
+      const terminal = await waitForTerminal(() => registry.status(started.id));
+      expect(terminal).toMatchObject({ status: "failed", code: "ENOENT", socketPath });
+      expect(terminal.failure).toContain("forward down");
+      expect(terminal.failure).toContain(socketPath);
+      expect(local.requests).toEqual([]);
+    } finally {
+      await registry.shutdown();
+    }
+  });
+
   test("watch kinds retain their required fields inside the actor", () => {
     expectTypeOf<WatchInput>().toExtend<StartWatchParams>();
     expectTypeOf<Extract<WatchInput, { kind: "agent_state" }>>()
@@ -133,6 +180,14 @@ describe("Herdr watch XState lifecycle", () => {
       expect(terminal.status).toBe(expected);
       await registry.shutdown();
     }
+  });
+
+  test.each(["ENOENT", "ECONNREFUSED"])("classifies custom forward error %s by code, not prose", (code) => {
+    const error = new HerdrTransportError({ operation: "agent.wait", code, message: "unrelated prose" });
+    expect(classifyWatchError(error, "/forward.sock")).toEqual({
+      kind: "failed", code, failure: "forward down: /forward.sock: unrelated prose",
+    });
+    expect(classifyWatchError(error)).toEqual({ kind: "failed", failure: "unrelated prose" });
   });
 
   test("classifies API codes without regexing messages", () => {

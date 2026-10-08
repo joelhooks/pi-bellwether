@@ -20,6 +20,7 @@ const watchBaseSchema = {
   startedAt: Type.Number(),
   wake: wakeSchema,
   timeoutMs: Type.Optional(Type.Number()),
+  socketPath: Type.Optional(Type.String({ minLength: 1 })),
 };
 
 const watchInputSchema = Type.Union([
