@@ -252,7 +252,11 @@ const ErrorEnvelope = Schema.Struct({
 
 export class HerdrTransportError extends Schema.TaggedError<HerdrTransportError>()(
   "HerdrTransportError",
-  { operation: Schema.String, message: Schema.String },
+  {
+    operation: Schema.String,
+    message: Schema.String,
+    code: Schema.optionalKey(Schema.String),
+  },
 ) {}
 
 export class HerdrProtocolError extends Schema.TaggedError<HerdrProtocolError>()(
@@ -290,6 +294,8 @@ export interface HerdrRequest<M extends HerdrMethod = HerdrMethod> {
   /** Null disables the client-side timeout for a server-held watch socket. */
   readonly timeoutMs?: number | null;
   readonly onWritten?: () => void;
+  /** Per-request override; never sent to Herdr in the wire envelope. */
+  readonly socketPath?: string;
 }
 
 export interface HerdrClient {
@@ -384,8 +390,12 @@ function readOneLine(
         ),
       );
     });
-    socket.once("error", (error) => {
-      finish(Effect.fail(new HerdrTransportError({ operation, message: error.message })));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      finish(Effect.fail(new HerdrTransportError({
+        operation,
+        message: error.message,
+        ...(error.code ? { code: error.code } : {}),
+      })));
     });
     socket.once("end", () => {
       finish(
@@ -510,7 +520,7 @@ export function createHerdrClient(options: HerdrClientOptions = {}): HerdrClient
           ? 0
           : (input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
       return readOneLine(
-        resolveHerdrSocketPath(options),
+        input.socketPath ?? resolveHerdrSocketPath(options),
         line,
         input.method,
         timeoutMs,

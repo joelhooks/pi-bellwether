@@ -397,14 +397,14 @@ describe("Bellwether public surface", () => {
     }
   });
 
-  test("suspends a direct watch on reload and resumes it once", async () => {
+  test.each([false, true])("suspends a direct watch on reload and resumes it once (custom socket: %s)", async (customSocket) => {
     const server = await startFakeHerdrServer((request, socket) => {
       if (request.method === "pane.get" || server.requests.filter((r) => r.method === "pane.wait_for_output").length >= 2) {
         socket.end(success(request, resultForMethod(request.method)));
       }
     });
     servers.push(server);
-    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    process.env.HERDR_SOCKET_PATH = customSocket ? `${server.socketPath}.unused` : server.socketPath;
     const branch: unknown[] = [];
     const first = harness(branch);
     const firstContext = context(branch);
@@ -419,6 +419,7 @@ describe("Bellwether public surface", () => {
         kind: "pane_output",
         pane: "w1:p1",
         match: "DONE",
+        ...(customSocket ? { socketPath: server.socketPath } : {}),
         timeoutSeconds: 60,
       },
       undefined,
@@ -426,6 +427,12 @@ describe("Bellwether public surface", () => {
       firstContext,
     );
     await vi.waitFor(() => expect(server.requests).toHaveLength(2));
+    if (customSocket) {
+      const listed = await firstWatch.execute("list", { action: "list" }, undefined, undefined, firstContext);
+      expect(listed.content[0]?.text).toContain(`socket=${server.socketPath}`);
+      const status = await firstWatch.execute("status", { action: "status", id: (started.details as { id: string }).id }, undefined, undefined, firstContext);
+      expect(status.content[0]?.text).toContain(`Socket: ${server.socketPath}`);
+    }
     await first.handlers.get("session_shutdown")?.({ reason: "reload" });
 
     const notifications: string[] = [];
@@ -451,6 +458,10 @@ describe("Bellwether public surface", () => {
         status: "matched",
       },
     });
+    if (customSocket) {
+      expect(started.details).toMatchObject({ socketPath: server.socketPath });
+      expect(second.messages[0]).toMatchObject({ details: { socketPath: server.socketPath } });
+    }
     expect(notifications).toContain("Bellwether resumed 1 wait after reload");
     await second.handlers.get("session_shutdown")?.({ reason: "quit" });
   });

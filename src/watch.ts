@@ -10,6 +10,7 @@ import type { AnyActorRef, EventObject } from "xstate";
 import {
   HerdrApiError,
   HerdrTimeoutError,
+  HerdrTransportError,
   HERDR_TRANSPORT_GRACE_MS,
   type HerdrClient,
   type HerdrError,
@@ -44,6 +45,8 @@ interface WatchBase {
   readonly kind: WatchKind;
   readonly label?: string;
   readonly timeoutMs?: number;
+  /** Direct Unix socket override, including an externally managed forward. */
+  readonly socketPath?: string;
   readonly wake?: WatchWake;
 }
 
@@ -101,6 +104,7 @@ export interface WatchReceipt {
   readonly wake: WatchWake;
   readonly target?: string;
   readonly pane?: string;
+  readonly socketPath?: string;
   readonly failure?: string;
   readonly code?: string;
   readonly result?: HerdrResult;
@@ -159,6 +163,7 @@ function watchRequest(
   if (input.kind === "agent_state") {
     return client.request({
       method: "agent.wait",
+      socketPath: input.socketPath,
       params: {
         target: input.target,
         until: input.until ?? [],
@@ -171,6 +176,7 @@ function watchRequest(
 
   return client.request({
     method: "pane.wait_for_output",
+    socketPath: input.socketPath,
     params: {
       pane_id: input.pane,
       source: wireReadSource(input.source ?? "recent-unwrapped"),
@@ -187,7 +193,17 @@ function watchRequest(
   });
 }
 
-export function classifyWatchError(error: HerdrError): WatchOutcome {
+export function classifyWatchError(error: HerdrError, socketPath?: string): WatchOutcome {
+  if (
+    socketPath && error instanceof HerdrTransportError &&
+    (error.code === "ENOENT" || error.code === "ECONNREFUSED")
+  ) {
+    return {
+      kind: "failed",
+      code: error.code,
+      failure: `forward down: ${socketPath}: ${error.message}`,
+    };
+  }
   if (error instanceof HerdrApiError) {
     if (error.code === "timeout") {
       return { kind: "timedOut", failure: error.message };
@@ -245,6 +261,7 @@ function probeAgent(
       const observation = yield* client
         .request({
           method: "agent.get",
+          socketPath: input.socketPath,
           params: { target: input.target },
         })
         .pipe(
@@ -324,6 +341,7 @@ export function watchReceiptText(receipt: WatchReceipt): string {
   ];
   if (receipt.target) lines.push(`Target: ${receiptField(receipt.target)}`);
   if (receipt.pane) lines.push(`Pane: ${receiptField(receipt.pane)}`);
+  if (receipt.socketPath) lines.push(`Socket: ${receiptField(receipt.socketPath)}`);
   if (receipt.finishedAt) lines.push(`Finished: ${receipt.finishedAt}`);
   if (receipt.code) lines.push(`Code: ${receiptField(receipt.code)}`);
   if (receipt.quiet === "reported") {
@@ -431,7 +449,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         let disposed = false;
         void Effect.runPromise(
           input.kind === "pane_output"
-            ? options.client.request({ method: "pane.get", params: { pane_id: input.pane } }).pipe(
+            ? options.client.request({ method: "pane.get", params: { pane_id: input.pane }, socketPath: input.socketPath }).pipe(
                 Effect.match({
                   onFailure: () => undefined,
                   onSuccess: (result) => {
@@ -474,7 +492,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
           if (!disposed) sendBack({ type: "WRITTEN" });
         }).pipe(
           Effect.match({
-            onFailure: classifyWatchError,
+            onFailure: (error) => classifyWatchError(error, input.socketPath),
             onSuccess: (result): WatchOutcome => ({ kind: "matched", result }),
           }),
         );
@@ -625,6 +643,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
           ? undefined
           : new Date(record.finishedAt).toISOString(),
       wake: record.input.wake,
+      ...(record.input.socketPath ? { socketPath: record.input.socketPath } : {}),
       target: record.input.kind === "agent_state" ? record.input.target : undefined,
       pane: record.input.kind === "pane_output" ? record.input.pane : undefined,
       failure: record.failure,
@@ -872,6 +891,9 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         throw new Error("pane and match are required for pane_output");
       }
 
+      if (params.socketPath !== undefined && !params.socketPath.trim()) {
+        throw new Error("socketPath must not be blank");
+      }
       const startedAt = now();
       const id = (options.createId ?? (() => randomUUID().slice(0, 8)))();
       const input: WatchInput = {

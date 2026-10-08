@@ -239,6 +239,7 @@ export const herdrWatchParameters = Type.Object(
     action: StringEnum(Action.watch),
     history: Type.Optional(Type.Boolean({ description: "For list: include retained terminal watches. Defaults to false (active only)." })),
     kind: Type.Optional(StringEnum(["agent_state", "pane_output"] as const)),
+    socketPath: Type.Optional(Type.String({ minLength: 1, description: "For start: direct Unix socket override, such as an externally managed forward. Persisted across reload and resume." })),
     id: Type.Optional(Type.String()),
     label: Type.Optional(Type.String({ maxLength: 120 })),
     target: Type.Optional(Type.String()),
@@ -928,6 +929,7 @@ function readText(result: HerdrResult): string {
 }
 
 function toStartWatchParams(params: {
+  socketPath?: string;
   kind?: "agent_state" | "pane_output";
   label?: string;
   target?: string;
@@ -945,6 +947,7 @@ function toStartWatchParams(params: {
     if (!params.target) throw new Error("target is required for agent_state");
     return {
       kind: "agent_state",
+      socketPath: params.socketPath,
       target: params.target,
       label: params.label,
       until: params.until,
@@ -961,6 +964,7 @@ function toStartWatchParams(params: {
     }
     return {
       kind: "pane_output",
+      socketPath: params.socketPath,
       pane: params.pane,
       match: params.match,
       label: params.label,
@@ -2117,6 +2121,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         const receipt = watches.start(
           toStartWatchParams({
             kind: params.kind,
+            socketPath: params.socketPath,
             label: params.label,
             target: params.target,
             pane: params.pane,
@@ -2143,7 +2148,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
             ? receipts
                 .map(
                   (receipt) =>
-                    `${receipt.id}\t${receipt.status}\t${receipt.kind}\t${receipt.label}`,
+                    `${receipt.id}\t${receipt.status}\t${receipt.kind}\t${receipt.label}${receipt.socketPath ? `\tsocket=${inlineField(receipt.socketPath)}` : ""}`,
                 )
                 .join("\n")
             : params.history

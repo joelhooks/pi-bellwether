@@ -58,6 +58,8 @@ Actions: `start`, `list`, `status`, `cancel`.
 
 Status and wake text include the target, failure code, and observed agent state or terminal match. Terminal evidence prefers the matched line and is limited to 12 lines / 2 KiB, with ANSI controls stripped and truncation marked. Full structured receipts remain in `details`. Read more output only when the excerpt is insufficient; an observed state or matching line does not prove task completion.
 
+For `start`, optional `socketPath` selects a direct Unix socket instead of the resolved local socket. Use an externally managed forwarded socket to watch another Herdr instance; Bellwether does not create or manage the forward. The wait and identity probes use that path. Status and list receipts show the override. Reload and `/herdr-resume` preserve it without extending the deadline. A missing or refused custom socket settles as `failed` with the path and `forward down`, not `targetGone`.
+
 Initial kinds:
 
 - `agent_state`
