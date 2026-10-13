@@ -537,6 +537,10 @@ describe("Bellwether public surface", () => {
         return;
       }
       if (request.method === "agent.wait") return;
+      if (request.method === "agent.get") {
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent: "claude" }) }));
+        return;
+      }
       socket.end(success(request, resultForMethod(request.method)));
     });
     servers.push(server);
@@ -639,8 +643,39 @@ describe("Bellwether public surface", () => {
     await handlers.get("session_shutdown")?.();
   });
 
+  // bellwether-yoink S3: a Pi reports turns over Rat King turn records, so agent_state on a Pi pane is refused.
+  test.each([
+    { agent: "pi", refused: true },
+    { agent: "claude", refused: false },
+  ])("agent_state on a $agent pane refused=$refused", async ({ agent, refused }) => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent }) }));
+        return;
+      }
+      if (request.method === "agent.wait") return;
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools } = harness();
+    const watch = tools.get("herdr_watch")!;
+    const start = watch.execute("w", { action: "start", kind: "agent_state", target: "worker" }, undefined, undefined, context());
+    if (refused) {
+      await expect(start).rejects.toThrow(/TurnUnsupported: worker is a Pi/);
+      expect((await watch.execute("l", { action: "list", history: true }, undefined, undefined, context())).details).toMatchObject({ watches: [] });
+    } else {
+      const started = await start;
+      await watch.execute("c", { action: "cancel", id: (started.details as WatchReceipt).id }, undefined, undefined, context());
+    }
+  });
+
   test("a prompt call that never executes fails its gated watch at turn end", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
+      if (request.method === "agent.get") {
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent: "claude" }) }));
+        return;
+      }
       socket.end(success(request, resultForMethod(request.method)));
     });
     servers.push(server);
@@ -676,7 +711,8 @@ describe("Bellwether public surface", () => {
           code: "prompt_unproven",
         },
       });
-      expect(server.requests).toHaveLength(0);
+      // Only the Pi check before start: the gated watch itself never reached Herdr.
+      expect(server.requests.map((r) => r.method)).toEqual(["agent.get"]);
     } finally {
       await handlers.get("session_shutdown")?.();
     }
@@ -731,7 +767,7 @@ describe("Bellwether public surface", () => {
     const goneGate = new Promise<void>((resolve) => { settleGone = resolve; });
     const server = await startFakeHerdrServer(async (request, socket) => {
       if (request.method === "agent.get") {
-        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working" }) }));
+        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent: "claude", agent_status: "working" }) }));
       } else if (request.method === "pane.get") {
         socket.end(success(request, { type: "pane_info", pane: paneInfo({ pane_id: request.params.pane_id, terminal_id: request.params.pane_id === "w1:p1" ? "term-1" : "term-other" }) }));
       } else if (gone && request.method === "agent.wait") {

@@ -24,6 +24,7 @@ Bellwether owns generic Herdr control. Project workflow (lanes, catalog rows, pa
 - `herdr_pane`: get, display-label rename/clear, run, read, send text/keys, guarded close.
 - `herdr_agent`: list, get, start, prompt, read, send keys, focus, rename.
 - `herdr_watch`: start, list, status, cancel for `agent_state` and `pane_output`.
+  `agent_state` on a Pi pane is refused (`TurnUnsupported`): a Pi reports done, blocked and crashed to its owner as Rat King turn records. Use `agent_state` for other agent kinds.
 
 Public deadlines use `timeoutSeconds`. Bellwether converts them to protocol milliseconds at the boundary. Never pass `timeout`.
 

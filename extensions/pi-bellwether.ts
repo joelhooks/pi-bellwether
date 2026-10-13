@@ -604,6 +604,30 @@ function agentFailureText(options: {
     : receipt.content;
 }
 
+/**
+ * bellwether-yoink S3: a Pi pane reports its turns as Rat King turn records (done, blocked, crashed) to its
+ * owner, so Bellwether no longer watches a Pi's agent state. Other agent kinds keep agent_state.
+ */
+async function refusePiAgentState(
+  client: HerdrClient,
+  target: string,
+  socketPath: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resolved = await runRequest(
+    client,
+    { method: "agent.get", params: { target }, ...(socketPath ? { socketPath } : {}) },
+    signal,
+  ).catch(() => undefined);
+  // An unresolved target is the watch's own error to report.
+  if (!resolved || stringField(recordField(resolved, "agent"), "agent") !== "pi") return;
+  throw new Error(
+    `TurnUnsupported: ${target} is a Pi; agent_state watches on Pi panes are retired. ` +
+      "A Muster row wakes its owner through Rat King turn records (done, blocked, crashed); no watch is needed. " +
+      "For a Pi Muster did not launch, use herdr_watch kind:\"pane_output\" or herdr_ping_wait.",
+  );
+}
+
 async function runRequest(
   client: HerdrClient,
   input: HerdrRequest,
@@ -2076,8 +2100,11 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       "Start, list, inspect, or cancel session-owned Herdr watches. Start returns immediately; timeoutSeconds uses seconds. List shows active watches; history=true includes retained terminal watches. Status and wakes include observed agent state or up to 12 lines/2KB of terminal evidence. Kinds are agent_state and pane_output.",
     promptSnippet: "Start or inspect a non-blocking direct-socket Herdr watch",
     parameters: herdrWatchParameters,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       if (params.action === "start") {
+        if (params.kind === "agent_state" && params.target) {
+          await refusePiAgentState(client, params.target, params.socketPath, signal);
+        }
         const receipt = watches.start(
           toStartWatchParams({
             kind: params.kind,
