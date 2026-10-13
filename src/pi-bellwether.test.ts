@@ -720,49 +720,6 @@ describe("Bellwether public surface", () => {
     }
   });
 
-  test("a worker's intercom report quiets its later done match", async () => {
-    const session = "11111111-2222-4333-8444-555555555555";
-    const agentSession = { source: "herdr:pi", agent: "pi", kind: "path", value: `/x/2026-09-25T00-00-00-000Z_${session}.jsonl` };
-    let release: () => void = () => {};
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const server = await startFakeHerdrServer(async (request, socket) => {
-      if (request.method === "agent.wait") {
-        await released;
-        socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "done", agent_session: agentSession }) }));
-        return;
-      }
-      socket.end(success(request, { type: "agent_info", agent: agentInfo({ agent_status: "working", agent_session: agentSession }) }));
-    });
-    servers.push(server);
-    process.env.HERDR_SOCKET_PATH = server.socketPath;
-    const { tools, handlers, messages } = harness();
-    await handlers.get("session_start")?.({ reason: "startup" }, context());
-    const watch = tools.get("herdr_watch");
-    if (!watch) throw new Error("herdr_watch missing");
-
-    try {
-      const started = await watch.execute("w", { action: "start", kind: "agent_state", target: "worker" }, undefined, undefined, context());
-      await vi.waitFor(() => expect(server.requests.map((request) => request.method)).toContain("agent.get"));
-      await sleep(20);
-      await handlers.get("message_end")?.({
-        type: "message_end",
-        message: { role: "custom", customType: "intercom_message", details: { from: { id: session } } },
-      });
-      release();
-      const id = (started.details as { id: string }).id;
-      await vi.waitFor(async () => {
-        const status = await watch.execute("s", { action: "status", id }, undefined, undefined, context());
-        expect(status.details).toMatchObject({ status: "matched", quiet: "reported" });
-      });
-      await sleep(400);
-      expect(messages).toHaveLength(0);
-    } finally {
-      await handlers.get("session_shutdown")?.();
-    }
-  });
-
   test.each([
     { label: "resolved named agent", target: "worker", paneId: "w1:p1" },
     { label: "terminal identity after renumbering", target: "worker", paneId: "w9:p9", terminalId: "term-1" },
@@ -903,42 +860,6 @@ describe("Bellwether public surface", () => {
     }
   });
 
-  test("intercom is a read-only directory: no publish, no wakes, no recorded signals", async () => {
-    process.env.HERDR_PANE_ID = "w1:p1";
-    const { handlers, messages, entries, events } = harness();
-    await handlers.get("session_start")?.({ reason: "startup" }, context());
-    const registration = events.emitted.find(
-      (entry) => entry.event === "intercom:extension-register",
-    )?.payload as
-      | { namespace: string; ownerEligible: boolean; onReady(channel: unknown): void; onEvent(event: unknown): void }
-      | undefined;
-    if (!registration) throw new Error("intercom directory did not register");
-    expect(registration).toMatchObject({ namespace: "bellwether/directory/v1", ownerEligible: false });
-
-    let published = 0;
-    registration.onReady({
-      snapshot: () => ({ connected: true, supported: true }),
-      listSessions: async () => [],
-      publish() {
-        published += 1;
-      },
-    });
-    registration.onEvent({ type: "connection", connected: true, supported: true });
-    registration.onEvent({ type: "session_joined", session: { id: "peer" } });
-    registration.onEvent({ type: "presence_update", session: { id: "peer" } });
-    registration.onEvent({
-      type: "message",
-      fromSessionId: "peer",
-      payload: { version: 1, eventId: "e1", sourceSessionId: "peer", targetSessionId: "test-session", kind: "wake_hint" },
-    });
-
-    expect(published).toBe(0);
-    expect(messages).toHaveLength(0);
-    expect(
-      (entries as Array<{ type: string }>).filter((entry) => entry.type.startsWith("bellwether-intercom")),
-    ).toHaveLength(0);
-    await handlers.get("session_shutdown")?.();
-  });
 });
 
 type ExpectedRequest = {
@@ -1975,7 +1896,7 @@ describe("Herdr 0.7.5 action parity", () => {
     }
   });
 
-  test("overview joins Pi agents to their intercom sessions", async () => {
+  test("overview keeps Pi session IDs without coordination metadata or load events", async () => {
     const sessionPath = (id: string) => ({
       source: "herdr:pi",
       agent: "pi",
@@ -2005,17 +1926,7 @@ describe("Herdr 0.7.5 action parity", () => {
     process.env.HERDR_PANE_ID = "w1:p1";
     const { tools, handlers, events } = harness();
     await handlers.get("session_start")?.({ reason: "startup" }, context());
-    const registration = events.emitted.find(
-      (entry) => entry.event === "intercom:extension-register",
-    )?.payload as { onReady(channel: unknown): void; namespace: string } | undefined;
-    if (!registration) throw new Error("intercom directory did not register");
-    registration.onReady({
-      snapshot: () => ({ connected: true, supported: true }),
-      listSessions: async () => [{ id: reachable, name: "Review Lane", status: "idle" }],
-      publish() {
-        throw new Error("Bellwether must not publish");
-      },
-    });
+    expect(events.emitted.filter((entry) => entry.event.startsWith("intercom:"))).toHaveLength(0);
     const layout = tools.get("herdr_layout");
     if (!layout) throw new Error("herdr_layout missing");
 
@@ -2023,19 +1934,19 @@ describe("Herdr 0.7.5 action parity", () => {
       const result = await layout.execute("o", { action: "overview" }, undefined, undefined, context());
       const text = result.content[0]?.text ?? "";
       expect(text).toContain(`pi ${reachable}`);
-      expect(text).toContain("intercom Review Lane (idle)");
-      expect(text).toContain("intercom offline");
+      expect(text).toContain(`pi ${offline}`);
+      expect(text).not.toContain("intercom");
+      expect(result.details).not.toHaveProperty("intercom");
       expect(result.details).toMatchObject({
-        intercom: "connected",
         agents: [
-          { name: "reviewer", piSessionId: reachable, intercom: { name: "Review Lane", status: "idle" } },
-          { name: "tests", piSessionId: offline, intercom: null },
+          { name: "reviewer", piSessionId: reachable },
+          { name: "tests", piSessionId: offline },
           { name: "claude" },
         ],
       });
-      const claude = (result.details as { agents: Array<Record<string, unknown>> }).agents[2];
-      expect(claude).not.toHaveProperty("piSessionId");
-      expect(claude).not.toHaveProperty("intercom");
+      const agents = (result.details as { agents: Array<Record<string, unknown>> }).agents;
+      for (const agent of agents) expect(agent).not.toHaveProperty("intercom");
+      expect(agents[2]).not.toHaveProperty("piSessionId");
     } finally {
       await handlers.get("session_shutdown")?.();
     }
@@ -2308,30 +2219,4 @@ test("session replacement writes no suspension entry", async () => {
   await tool.execute("call-1", { action: "start", paneIds: ["w1:p1"], timeoutSeconds: 60 }, undefined, undefined, context(branch));
   await handlers.get("session_shutdown")?.({ reason: "new" });
   expect(entries.some((entry) => (entry as { type: string }).type === "bellwether-suspended")).toBe(false);
-});
-
-test("startup warns once about pre-fix intercom presence chatter on the branch", async () => {
-  const branch: unknown[] = [];
-  for (let index = 0; index < 1_500; index += 1) {
-    branch.push({
-      type: "custom",
-      customType: "bellwether-intercom-signal",
-      id: `c${index}`,
-      parentId: null,
-      data: { eventId: `e${index}`, kind: index % 2 === 0 ? "capability" : "binding", sourceSessionId: "peer" },
-    });
-  }
-  const notifications: string[] = [];
-  const { handlers } = harness(branch);
-  await handlers.get("session_start")?.({ reason: "startup" }, context(branch, notifications));
-  const warning = notifications.find((line) => line.startsWith("Bellwether: this session carries"));
-  expect(warning).toContain("1,500");
-  expect(warning).toContain("strip-intercom-chatter.mjs");
-  await handlers.get("session_shutdown")?.({ reason: "quit" });
-
-  const clean: string[] = [];
-  const second = harness([]);
-  await second.handlers.get("session_start")?.({ reason: "startup" }, context([], clean));
-  expect(clean.some((line) => line.startsWith("Bellwether: this session carries"))).toBe(false);
-  await second.handlers.get("session_shutdown")?.({ reason: "quit" });
 });
