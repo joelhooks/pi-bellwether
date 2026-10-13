@@ -16,7 +16,7 @@ import {
   type HerdrError,
   type HerdrResult,
 } from "./herdr-client.ts";
-import { piSessionIdFromAgent } from "./intercom.ts";
+import { piSessionIdFromAgent } from "./pi-session.ts";
 import type { PromptGateOutcome } from "./prompt-gate.ts";
 
 export const MAX_ACTIVE_WATCHES = 32;

@@ -71,9 +71,7 @@ Initial kinds:
 
 `/quit` writes the same suspension entry. After a process restart against the same session file (`pi --session <file>`), `/herdr-resume` restores the newest entry on request: it skips waits whose absolute deadline already passed and waits that are already active, and it never runs by itself. Run it before the first `/reload` in the new process, because a reload writes a fresh (possibly empty) entry that becomes the newest.
 
-On every non-reload start Bellwether counts pre-fix intercom presence entries on the branch (versions before 1.2.1 recorded every `capability` and `binding` announcement). At 1,000 or more it prints one warning naming `scripts/strip-intercom-chatter.mjs`, which drops those entries, re-links the id/parentId tree, verifies it, and backs the file up before rewriting. Quit the owning Pi process first; a live process keeps the old entries in memory.
-
-The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Intercom can carry a compact workflow-receipt hint, but consumers must reread `herdr-workflow` as durable authority. Bellwether has no workflow-watch adapter. Add one only when a concrete consumer and result contract exist.
+The approved first cut intentionally supports only `agent_state` and `pane_output`. `workflow_receipt` is not a watch kind. Bellwether has no workflow-watch adapter. Add one only when a concrete consumer and result contract exist.
 
 ## Wakes
 
@@ -83,10 +81,9 @@ Watch and degraded ping-wait settlements wake the agent through one router (`src
 - A held wake is delayed at most five minutes if an `agent_end` is missed. It is never dropped.
 - Bellwether first offers the follow-up to pi-until's session arbiter on `pi-until:follow-up`. When pi-until accepts, it serializes the wake with its own follow-ups and Pi receives `details: { followUpId, receipt }`. Otherwise Bellwether sends the follow-up directly.
 - Session shutdown delivers held wakes directly, because pi-until may be stopping its queue in the same shutdown.
-- A worker's own intercom report supersedes its state watch. Each agent-state watch learns the target's Pi session from its liveness probe. If that session messages the owner after the watch starts, a later `idle` or `done` match is recorded as a quiet receipt (`quiet: "reported"`) and does not wake the agent. `blocked`, `targetGone`, `timedOut`, and failures still wake it. On 2026-09-25, 124 of 217 fleet watch wakes in 36 hours were no-ops, most after the worker had already reported.
 - Cancelling a watch withdraws its wake if the wake is still held behind the current run.
 
-## Intercom and wakes
+## Pane-close wakes
 
 An owner closing a pane can emit `bellwether/pane-close/v1` on `pi.events`:
 
@@ -102,15 +99,6 @@ An owner closing a pane can emit `bellwether/pane-close/v1` on `pi.events`:
 Bellwether subscribes at extension load but performs no I/O until a watch starts. It never publishes this event. The listener cancels matching local active watches, including gated watches, and withdraws held wakes. Matching uses the stable pane ID, a named agent's observed pane ID, or the optional terminal ID after pane renumbering. Pane-output watches resolve their terminal identity once; agent-state watches learn it from their existing liveness probe. A gated pane target can match directly before any probe runs.
 
 The retained receipt is `cancelled` with `failure: "pane closed by owner: <reason>"`; cancellation does not wake. If a watch already settled as `targetGone` (or another terminal status), it is retired only when its wake is still held. Already-delivered wakes cannot be recalled. `reply` receives `{ retired }` synchronously. Invalid payloads are ignored with a payload-free debug log.
-
-## Pi intercom
-
-Bellwether reads pi-intercom; it does not publish on it. It registers `bellwether/directory/v1` with `ownerEligible: false` only to list live intercom sessions.
-
-- `herdr_layout overview` adds `piSessionId` to each Pi agent, parsed from Herdr's `agent_session` path. pi-intercom uses the same ID, so `intercom send` can target it directly.
-- When pi-intercom is connected, each Pi agent also gets `intercom: { name, status }`, or `intercom: null` when that session is not reachable. Details report `intercom: "connected" | "unavailable"`. The session list read is bounded to 1.5 seconds.
-- Bellwether versions up to 1.3 broadcast capability, binding, watch, wake, and workflow-receipt hints on `bellwether/herdr/v1`. Nothing consumed them, and recording them bloated session files. That traffic is gone. The startup chatter warning still detects old entries.
-- Missing or unsupported pi-intercom leaves every Herdr tool unchanged.
 
 ## Slash commands
 

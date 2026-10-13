@@ -19,21 +19,18 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 - `herdr_agent prompt` is a bounded delivery handshake. Resolve a stable pane ID, submit once, and require Herdr-observed `working` state within one 30-second proof deadline. A stall recovery may use `agent.wait`; it must never resubmit or wait for completion. The public schema exposes no wait options, and prompt starts no watch.
 - Use Herdr `error.code`. Do not classify errors from message text.
 - Cancel and non-reload `session_shutdown` close exact owned sockets and suppress late wakes. `/reload` and `quit` first persist active direct and degraded waits into a versioned branch entry, then close them. Only the replacement extension instance after `/reload` restores automatically, without extending deadlines. `/herdr-resume` is the one explicit restore path after a process restart: newest entry, expired and already-active waits skipped, never automatic. Session replacement writes nothing.
-- Every non-reload `session_start` counts pre-fix `bellwether-intercom-signal` presence entries on the branch (`src/chatter.ts`) and prints one warning at 1,000 or more naming `scripts/strip-intercom-chatter.mjs`. Startup must not delete or rewrite anything.
 - Tool `details` must remain structured-clone-safe plain data.
 - Keep `herdr_ping_wait` visibly degraded and isolated. Only explicit `action=start` may spawn its child.
 
-## Intercom and wakes
-
-Register `bellwether/directory/v1` through `pi.events` with `ownerEligible: false`, only to read pi-intercom's live session list for `herdr_layout overview`. Never publish on the bus and never record bus traffic. Do not statically import pi-intercom at runtime.
+## Wakes
 
 Bellwether subscribes to `bellwether/pane-close/v1` at extension load without I/O or publishing. The payload is `{ paneId: string, terminalId?: string, reason: string, reply?: (result: { retired: string[] }) => void }`. Match local watches by stable pane ID, resolved named-agent pane, or terminal ID. Cancel active (including gated) matches through the watch registry with `pane closed by owner: <reason>` and withdraw held wakes; already-settled matches are retired only when their wake is still held. Reply synchronously with retired IDs. Ignore malformed payloads and log only a payload-free debug message. Delivered wakes cannot be recalled.
 
-Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. An inbound `intercom_message` from a watched target's Pi session marks its agent-state watches reported; a later idle/done match is a quiet receipt, never a wake. Cancel withdraws a held wake by watch id.
+Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. Cancel withdraws a held wake by watch id.
 
 ## Library exports
 
-`package.json` `exports` lets downstream packages (Muster 🐑) import the generic modules as a library: `herdr-client`, `intercom`, `sidebar`, `wake`, and `watch`. Each maps to its `src/*.ts` file, which `files` already ships. Keep those modules free of product policy; a downstream package imports them and never the extension file. Bellwether never imports a downstream package. Changing an exported signature is a breaking change for Muster.
+`package.json` `exports` lets downstream packages (Muster 🐑) import the generic modules as a library: `herdr-client`, `sidebar`, `wake`, and `watch`. Each maps to its `src/*.ts` file, which `files` already ships. Keep those modules free of product policy; a downstream package imports them and never the extension file. Bellwether never imports a downstream package. Changing an exported signature is a breaking change for Muster.
 
 ## Public tools
 

@@ -33,17 +33,14 @@
   "exports": {
     "./package.json": "./package.json",
     "./herdr-client": "./src/herdr-client.ts",
-    "./intercom": "./src/intercom.ts",
     "./sidebar": "./src/sidebar.ts",
     "./wake": "./src/wake.ts",
     "./watch": "./src/watch.ts"
   },
   "files": [
     "extensions/pi-bellwether.ts",
-    "scripts/strip-intercom-chatter.mjs",
-    "src/chatter.ts",
     "src/herdr-client.ts",
-    "src/intercom.ts",
+    "src/pi-session.ts",
     "src/ping-wait.ts",
     "src/prompt-gate.ts",
     "src/sidebar.ts",

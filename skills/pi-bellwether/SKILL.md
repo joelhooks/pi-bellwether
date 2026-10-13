@@ -55,7 +55,7 @@ Wake policies:
 
 Agent-state watches re-probe `agent.get` every five seconds. If a worker crashes back to a live shell without a Herdr release event, the watch settles as `targetGone` and wakes according to policy. A lifecycle match is diagnostic. It does not prove a worker finished its task.
 
-Active direct watches and degraded ping waits survive `/reload`. Bellwether suspends them into the current Pi branch, closes the old sockets or child processes, and restores them with the same IDs and original absolute deadlines. It restores automatically only on `reason: "reload"`; new, resumed, and forked sessions do not revive old waits. `/quit` writes the same suspension entry, and after a process restart against the same session file the operator can run `/herdr-resume` to restore it explicitly (expired and already-active waits are skipped). If a session start warns about pre-fix intercom presence chatter, quit Pi, run the named `strip-intercom-chatter.mjs` script with `--apply`, resume the session, then `/herdr-resume` and `/until-resume`.
+Active direct watches and degraded ping waits survive `/reload`. Bellwether suspends them into the current Pi branch, closes the old sockets or child processes, and restores them with the same IDs and original absolute deadlines. It restores automatically only on `reason: "reload"`; new, resumed, and forked sessions do not revive old waits. `/quit` writes the same suspension entry, and after a process restart against the same session file the operator can run `/herdr-resume` to restore it explicitly (expired and already-active waits are skipped).
 
 ## Sidebar
 
@@ -71,11 +71,11 @@ It makes no Herdr request while no watch is active. `$progress` belongs to the p
 
 Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and refuses the pane that hosts Pi.
 
-## Intercom and wakes
+## Wakes
 
-`herdr_layout overview` lists each Pi agent's `piSessionId` and, when pi-intercom is connected, its intercom name and status (`intercom: null` means unreachable). Use that ID with `intercom send` to reach a session directly. Report-to addresses and what counts as evidence are Muster's policy, not Bellwether's.
+`herdr_layout overview` lists each Pi agent's `piSessionId`. Report-to addresses and what counts as evidence are Muster's policy, not Bellwether's.
 
-Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. A worker that reports over intercom turns its later idle/done watch match into a quiet receipt (`quiet: "reported"` in status), so it does not wake you twice; blocked, crashed, and timed-out targets still do. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
+Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
 
 ## Degraded fallback
 
