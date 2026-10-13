@@ -369,7 +369,7 @@ export function watchReceiptText(receipt: WatchReceipt): string {
   return lines.join("\n");
 }
 
-function wakeInstruction(status: Exclude<WatchStatus, "running">): string {
+export function wakeInstruction(status: Exclude<WatchStatus, "running">): string {
   if (status === "matched") {
     return "A Herdr watch matched. Inspect the receipt before continuing.";
   }

@@ -34,7 +34,7 @@
     "./package.json": "./package.json",
     "./herdr-client": "./src/herdr-client.ts",
     "./sidebar": "./src/sidebar.ts",
-    "./wake": "./src/wake.ts",
+    "./wake-record": "./src/wake-record.ts",
     "./watch": "./src/watch.ts"
   },
   "files": [
@@ -44,7 +44,7 @@
     "src/ping-wait.ts",
     "src/sidebar.ts",
     "src/suspension.ts",
-    "src/wake.ts",
+    "src/wake-record.ts",
     "src/watch.ts",
     "skills/pi-bellwether/SKILL.md",
     "README.md",

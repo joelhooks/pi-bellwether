@@ -26,6 +26,14 @@ Bellwether controls Herdr and observes agent state or pane output. It does not o
 
 The public `list` action returns active watches by default. `history: true` includes retained terminal receipts; status-by-ID still works after settlement. This removes routine history output without changing lifecycle, retention, cancellation, or wake delivery.
 
+## Wake delivery
+
+`src/wake-record.ts` encodes settled watches and degraded ping waits as `sh.mschf.agentgraph.wake` records. Bellwether sends them to the owner's live Rat King name. pi-ratking owns urgency, batching, withdrawal, and delivery through pi-until. Bellwether no longer holds wakes behind the current agent run.
+
+The record omits socket routing. Text is capped at 8192 characters, terminal evidence at 12 lines / 2048 characters, and encoded JSON at 16 KB. No live self name means one local follow-up. Refused mail or a missing delivery result after 15 seconds adds a warning and delivers the same local follow-up.
+
+Cancel sends a `cancelled` record for a mailed wake, including when the original send is still in flight. Owner pane close uses the same withdrawal path. Local follow-ups cannot be withdrawn. Notify, silent, and already-reported receipts stay local only.
+
 ## Evidence
 
-`src/watch.test.ts` checks required variant fields, one terminal notification, cancellation, generation isolation, shutdown, and receipt limits. `src/watch-receipt.test.ts` checks evidence selection, UTF-8/line bounds, truncation, and failure codes. `src/pi-bellwether.test.ts` checks that status and wake expose the same evidence and terminal history is opt-in.
+`src/watch.test.ts` checks required variant fields, one terminal notification, cancellation, generation isolation, shutdown, and receipt limits. `src/watch-receipt.test.ts` checks evidence selection, UTF-8/line bounds, truncation, and failure codes. `src/pi-bellwether.test.ts` checks that status and wake expose the same evidence, terminal history is opt-in, and wake mail and cancellation reach the event bus. `src/wake-record.test.ts` checks strict field limits, clipping, fallback deadlines, and withdrawal ordering. Dropping the cancellation send must fail both the unit withdrawal test and the extension cancellation test.

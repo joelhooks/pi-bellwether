@@ -33,7 +33,7 @@ import type {
   HerdrResult,
 } from "../src/herdr-client.ts";
 import { piSessionIdFromAgent } from "../src/pi-session.ts";
-import { createWakeRouter } from "../src/wake.ts";
+import { createWakeDelivery, deliverLocal, toWakeRecord } from "../src/wake-record.ts";
 import {
   createPingWaitActor,
   resolvePingWaitBinary,
@@ -1080,17 +1080,15 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   const client = createHerdrClient();
   const pingWaits = new Map<string, PingWaitRecord>();
   let currentContext: ExtensionContext | undefined;
-  let agentBusy = false;
   let watchWidgetFrame = 0;
   let watchWidgetTimer: ReturnType<typeof setInterval> | undefined;
   let watchWidgetTui: { requestRender: () => void } | undefined;
   let shuttingDown = false;
   let sidebar: SidebarReporter | undefined;
-  const wakes = createWakeRouter({
+  const wakes = createWakeDelivery({
     events: pi.events,
-    sendMessage: (message, options) => pi.sendMessage(message, options),
-    isBusy: () => agentBusy,
-    createId: () => randomUUID(),
+    local: (message) => deliverLocal(pi.events, (wake, options) => pi.sendMessage(wake, options), message),
+    warn: (message) => currentContext?.ui.notify(message, "warning"),
   });
 
   const requestWatchWidgetRender = () => watchWidgetTui?.requestRender();
@@ -1099,7 +1097,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     client,
     appendEntry: (type, data) => pi.appendEntry(type, data),
     notify: (message, level) => currentContext?.ui.notify(message, level),
-    sendMessage: (message) => wakes.wake({ ...message, key: message.details.id }),
+    sendMessage: (message) => wakes.wake(toWakeRecord(message.details), message),
     onLifecycle: () => {
       sidebar?.changed();
       requestWatchWidgetRender();
@@ -1152,7 +1150,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       );
       return;
     }
-    wakes.wake({
+    wakes.wake(toWakeRecord(receipt), {
       content: `Degraded Herdr ping fallback settled. Inspect the pane and receipt before continuing.\n\n${JSON.stringify(receipt)}`,
       customType: "herdr-ping-wait",
       details: receipt,
@@ -2189,20 +2187,11 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
         params.action === "cancel"
           ? watches.cancel(params.id)
           : watches.status(params.id);
-      // A watch that matched moments before the cancel may still have its wake
-      // held behind the owner's current run. The owner is done with it.
+      // Ask the reader to drop a mailed wake if still held. A local follow-up
+      // already delivered to Pi cannot be withdrawn.
       if (params.action === "cancel") wakes.withdraw(params.id);
       return toolText(watchReceiptText(receipt), receipt);
     },
-  });
-
-  // Wakes that settle during a run wait for it to end, then go out as one.
-  pi.on("agent_start", () => {
-    agentBusy = true;
-  });
-  pi.on("agent_end", () => {
-    agentBusy = false;
-    wakes.idle();
   });
 
   pi.on("tool_result", (event) => {
@@ -2246,9 +2235,12 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       if (!params.id) throw new Error(`id is required for action=${params.action}`);
       const record = pingWaits.get(params.id);
       if (!record) throw new Error(`unknown Herdr ping wait: ${params.id}`);
-      if (params.action === "cancel" && record.status === "running") {
-        record.actor.send({ type: "CANCEL" });
-        record.controller.abort();
+      if (params.action === "cancel") {
+        wakes.withdraw(params.id);
+        if (record.status === "running") {
+          record.actor.send({ type: "CANCEL" });
+          record.controller.abort();
+        }
       }
       return toolText(JSON.stringify(pingReceipt(record), null, 2), pingReceipt(record));
     },
@@ -2456,9 +2448,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     watchWidgetTimer = undefined;
     currentContext?.ui.setWidget(WATCH_WIDGET_ID, undefined);
     watchWidgetTui = undefined;
-    // Wakes that settled just before shutdown still reach the next run.
-    wakes.flush({ direct: true });
-    agentBusy = false;
     const stoppingSidebar = sidebar?.stop();
     sidebar = undefined;
 

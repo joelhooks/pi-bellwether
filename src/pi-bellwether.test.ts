@@ -66,6 +66,9 @@ class EventBus {
   private readonly listeners = new Map<string, Array<(payload: unknown) => void>>();
   emit(event: string, payload: unknown) {
     this.emitted.push({ event, payload });
+    if (event === "ratking/status" && !this.listeners.has(event)) {
+      this.emit("ratking/status:result", { requestId: (payload as { requestId: string }).requestId, name: null, reader: "off" });
+    }
     for (const listener of this.listeners.get(event) ?? []) listener(payload);
   }
   on(event: string, listener: (payload: unknown) => void) {
@@ -76,6 +79,20 @@ class EventBus {
   }
 }
 
+function liveWakeMail(events: EventBus) {
+  const records: Array<Record<string, unknown>> = [];
+  events.on("ratking/status", (value) => {
+    const request = value as Record<string, unknown>;
+    events.emit("ratking/status:result", { requestId: request.requestId, name: "test/owner", reader: "live" });
+  });
+  events.on("ratking/send", (value) => {
+    const request = value as Record<string, unknown>;
+    records.push(request);
+    events.emit("ratking/send:result", { requestId: request.requestId, status: "delivered", id: "mail-1" });
+  });
+  return records;
+}
+
 type TestCommand = (args: string, ctx: unknown) => Promise<void>;
 
 function harness(branch: unknown[] = []) {
@@ -83,6 +100,7 @@ function harness(branch: unknown[] = []) {
   const commands = new Map<string, TestCommand>();
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const messages: unknown[] = [];
+  const deliveries: unknown[] = [];
   const entries: unknown[] = [];
   const events = new EventBus();
   const apiDouble = {
@@ -100,13 +118,14 @@ function harness(branch: unknown[] = []) {
     registerTool(tool: TestTool) {
       tools.set(tool.name, tool);
     },
-    sendMessage(message: unknown) {
+    sendMessage(message: unknown, options: unknown) {
       messages.push(message);
+      deliveries.push(options);
     },
   };
   // SAFETY: the extension factory only uses the methods supplied by this test double.
   bellwetherExtension(apiDouble as unknown as ExtensionAPI);
-  return { tools, commands, handlers, messages, entries, events };
+  return { tools, commands, handlers, messages, deliveries, entries, events };
 }
 
 function context(branch: unknown[] = [], notifications: string[] = []) {
@@ -629,19 +648,19 @@ describe("Bellwether public surface", () => {
     }
   });
 
-  test("watches that settle during a run wake the agent once after it ends", async () => {
+  test("watches that settle send separate wake records to the live self name", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       socket.end(success(request, resultForMethod(request.method)));
     });
     servers.push(server);
     process.env.HERDR_SOCKET_PATH = server.socketPath;
-    const { tools, handlers, messages } = harness();
+    const { tools, handlers, messages, events } = harness();
+    const records = liveWakeMail(events);
     await handlers.get("session_start")?.({ reason: "startup" }, context());
     const watch = tools.get("herdr_watch");
     if (!watch) throw new Error("herdr_watch missing");
 
     try {
-      await handlers.get("agent_start")?.({ type: "agent_start" });
       for (const pane of ["w1:p2", "w1:p3"]) {
         await watch.execute(
           `call-${pane}`,
@@ -651,17 +670,11 @@ describe("Bellwether public surface", () => {
           context(),
         );
       }
-      await sleep(400);
+      await vi.waitFor(() => expect(records).toHaveLength(2));
       expect(messages).toHaveLength(0);
-
-      await handlers.get("agent_end")?.({ type: "agent_end" });
-      await vi.waitFor(() => expect(messages).toHaveLength(1));
-      expect(messages[0]).toMatchObject({
-        customType: "bellwether-wakes",
-        content: expect.stringContaining("2 Bellwether waits settled"),
-      });
-      await sleep(400);
-      expect(messages).toHaveLength(1);
+      for (const request of records) {
+        expect(request).toMatchObject({ to: "test/owner", kind: "data", record: { $type: "sh.mschf.agentgraph.wake", status: "matched", kind: "pane_output" } });
+      }
     } finally {
       await handlers.get("session_shutdown")?.();
     }
@@ -688,6 +701,7 @@ describe("Bellwether public surface", () => {
     servers.push(server);
     process.env.HERDR_SOCKET_PATH = server.socketPath;
     const { tools, handlers, messages, events } = harness();
+    const records = liveWakeMail(events);
     const watch = tools.get("herdr_watch")!;
     const run = (params: Record<string, unknown>) => watch.execute("w", params, undefined, undefined, context());
     await handlers.get("agent_start")?.({ type: "agent_start" });
@@ -709,6 +723,7 @@ describe("Bellwether public surface", () => {
       const reply = vi.fn();
       events.emit("bellwether/pane-close/v1", { paneId, terminalId, reason: "packet landed", reply });
       expect(reply).toHaveBeenCalledExactlyOnceWith({ retired: [id, alsoId] });
+      if (gone) await vi.waitFor(() => expect(records).toContainEqual(expect.objectContaining({ record: expect.objectContaining({ watch: id, status: "cancelled" }) })));
       expect((await run({ action: "status", id: alsoId })).details).toMatchObject({ status: "cancelled", failure: "pane closed by owner: packet landed" });
       expect((await run({ action: "status", id })).details).toMatchObject({ status: "cancelled", failure: "pane closed by owner: packet landed" });
       expect((await run({ action: "status", id: (other.details as WatchReceipt).id })).details).toMatchObject({ status: "running" });
@@ -736,47 +751,114 @@ describe("Bellwether public surface", () => {
     } finally { debug.mockRestore(); }
   });
 
-  test("cancelling a watch drops its wake if it is still held", async () => {
-    const server = await startFakeHerdrServer((request, socket) => {
-      socket.end(success(request, resultForMethod(request.method)));
-    });
-    servers.push(server);
-    process.env.HERDR_SOCKET_PATH = server.socketPath;
-    const { tools, handlers, messages } = harness();
-    await handlers.get("session_start")?.({ reason: "startup" }, context());
-    const watch = tools.get("herdr_watch");
-    if (!watch) throw new Error("herdr_watch missing");
-
-    try {
-      await handlers.get("agent_start")?.({ type: "agent_start" });
-      const started = await watch.execute("w", { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE" }, undefined, undefined, context());
-      const id = (started.details as { id: string }).id;
-      await vi.waitFor(async () => {
-        const status = await watch.execute("s", { action: "status", id }, undefined, undefined, context());
-        expect(status.details).toMatchObject({ status: "matched" });
-      });
-      await watch.execute("c", { action: "cancel", id }, undefined, undefined, context());
-      await handlers.get("agent_end")?.({ type: "agent_end" });
-      await sleep(400);
-      expect(messages).toHaveLength(0);
-    } finally {
-      await handlers.get("session_shutdown")?.();
-    }
-  });
-
-  test("wakes go through pi-until's arbiter when it accepts them", async () => {
+  test("cancelling a watch sends a cancelled record after its mailed wake", async () => {
     const server = await startFakeHerdrServer((request, socket) => {
       socket.end(success(request, resultForMethod(request.method)));
     });
     servers.push(server);
     process.env.HERDR_SOCKET_PATH = server.socketPath;
     const { tools, handlers, messages, events } = harness();
-    const requests: Array<Record<string, unknown>> = [];
-    events.on("pi-until:follow-up", (payload) => {
-      const request = payload as Record<string, unknown>;
-      requests.push(request);
-      (request.accept as () => void)();
+    const records = liveWakeMail(events);
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    const watch = tools.get("herdr_watch");
+    if (!watch) throw new Error("herdr_watch missing");
+
+    try {
+      const started = await watch.execute("w", { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE" }, undefined, undefined, context());
+      const id = (started.details as { id: string }).id;
+      await vi.waitFor(async () => {
+        const status = await watch.execute("s", { action: "status", id }, undefined, undefined, context());
+        expect(status.details).toMatchObject({ status: "matched" });
+      });
+      await vi.waitFor(() => expect(records).toHaveLength(1));
+      await watch.execute("c", { action: "cancel", id }, undefined, undefined, context());
+      await vi.waitFor(() => expect(records).toHaveLength(2));
+      expect(records.map((request) => request.record)).toEqual([
+        expect.objectContaining({ watch: id, status: "matched" }),
+        expect.objectContaining({ watch: id, status: "cancelled" }),
+      ]);
+      expect(messages).toHaveLength(0);
+    } finally {
+      await handlers.get("session_shutdown")?.();
+    }
+  });
+
+  test.each(["no-name", "refused"] as const)("%s wake uses exactly one local followUp", async (mode) => {
+    const server = await startFakeHerdrServer((request, socket) => { socket.end(success(request, resultForMethod(request.method))); });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages, deliveries, events } = harness();
+    const notifications: string[] = [];
+    const ctx = context([], notifications);
+    if (mode === "refused") {
+      events.on("ratking/status", (value) => events.emit("ratking/status:result", { requestId: (value as { requestId: string }).requestId, name: "owner", reader: "live" }));
+      events.on("ratking/send", (value) => events.emit("ratking/send:result", { requestId: (value as { requestId: string }).requestId, status: "not-delivered", code: "refused", reason: "offline" }));
+    }
+    await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+    try {
+      const started = await tools.get("herdr_watch")!.execute("w", { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE", label: "worker" }, undefined, undefined, ctx);
+      await vi.waitFor(() => expect(messages).toHaveLength(1));
+      expect(messages[0]).toMatchObject({ customType: "bellwether-herdr-watch", details: { id: (started.details as WatchReceipt).id, status: "matched" }, display: true });
+      expect(deliveries).toEqual([{ deliverAs: "followUp", triggerTurn: true }]);
+      // Offered to pi-until's arbiter first; nobody accepted, so it went direct.
+      expect(events.emitted.filter(({ event }) => event === "pi-until:follow-up")).toHaveLength(1);
+      expect(notifications).toEqual(mode === "refused" ? ["worker: wake mail refused (refused: offline); delivered locally"] : []);
+    } finally { await handlers.get("session_shutdown")?.(); }
+  });
+
+  test.each(["agent", "notify", "silent"] as const)("matched agent_state wake policy %s", async (wake) => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, request.method === "agent.get"
+        ? { type: "agent_info", agent: agentInfo({ agent: "claude", agent_status: "working" }) }
+        : resultForMethod(request.method)));
     });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages, events } = harness();
+    const records = liveWakeMail(events);
+    const notifications: string[] = [];
+    const ctx = context([], notifications);
+    await handlers.get("session_start")?.({ reason: "startup" }, ctx);
+    try {
+      const started = await tools.get("herdr_watch")!.execute("w", { action: "start", kind: "agent_state", target: "worker", until: ["idle"], wake }, undefined, undefined, ctx);
+      const id = (started.details as WatchReceipt).id;
+      await vi.waitFor(async () => {
+        const status = await tools.get("herdr_watch")!.execute("s", { action: "status", id }, undefined, undefined, ctx);
+        expect(status.details).toMatchObject({ status: "matched" });
+      });
+      if (wake === "agent") {
+        await vi.waitFor(() => expect(records).toHaveLength(1));
+        expect(records[0]).toMatchObject({ to: "test/owner", kind: "data", record: { watch: id, kind: "agent_state", status: "matched" } });
+      } else expect(records).toHaveLength(0);
+      expect(messages).toHaveLength(0);
+      expect(notifications).toHaveLength(wake === "notify" ? 1 : 0);
+    } finally { await handlers.get("session_shutdown")?.(); }
+  });
+
+  test("a local wake goes through pi-until's arbiter when it accepts", async () => {
+    const server = await startFakeHerdrServer((request, socket) => { socket.end(success(request, resultForMethod(request.method))); });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages, events } = harness();
+    const offered: unknown[] = [];
+    events.on("pi-until:follow-up", (value) => { offered.push(value); (value as { accept: () => void }).accept(); });
+    await handlers.get("session_start")?.({ reason: "startup" }, context());
+    try {
+      const started = await tools.get("herdr_watch")!.execute("w", { action: "start", kind: "pane_output", pane: "w1:p2", match: "DONE", label: "worker" }, undefined, undefined, context());
+      await vi.waitFor(() => expect(offered).toHaveLength(1));
+      expect(offered[0]).toMatchObject({ version: 1, source: "bellwether", customType: "bellwether-herdr-watch", details: { id: (started.details as WatchReceipt).id, status: "matched" } });
+      expect(messages).toHaveLength(0);
+    } finally { await handlers.get("session_shutdown")?.(); }
+  });
+
+  test("wakes use Rat King rather than pi-until directly", async () => {
+    const server = await startFakeHerdrServer((request, socket) => {
+      socket.end(success(request, resultForMethod(request.method)));
+    });
+    servers.push(server);
+    process.env.HERDR_SOCKET_PATH = server.socketPath;
+    const { tools, handlers, messages, events } = harness();
+    const requests = liveWakeMail(events);
     await handlers.get("session_start")?.({ reason: "startup" }, context());
     const watch = tools.get("herdr_watch");
     if (!watch) throw new Error("herdr_watch missing");
@@ -790,12 +872,8 @@ describe("Bellwether public surface", () => {
         context(),
       );
       await vi.waitFor(() => expect(requests).toHaveLength(1));
-      expect(requests[0]).toMatchObject({
-        version: 1,
-        source: "bellwether",
-        customType: "bellwether-herdr-watch",
-        details: { status: "matched" },
-      });
+      expect(requests[0]).toMatchObject({ to: "test/owner", record: { status: "matched", source: "herdr_watch" } });
+      expect(events.emitted.some(({ event }) => event === "pi-until:follow-up")).toBe(false);
       expect(messages).toHaveLength(0);
     } finally {
       await handlers.get("session_shutdown")?.();

@@ -24,13 +24,13 @@ Product-specific workflow policy belongs downstream. `herdr-workflow` owns durab
 
 ## Wakes
 
-Bellwether subscribes to `bellwether/pane-close/v1` at extension load without I/O or publishing. The payload is `{ paneId: string, terminalId?: string, reason: string, reply?: (result: { retired: string[] }) => void }`. Match local watches by stable pane ID, resolved named-agent pane, or terminal ID. Cancel active (including gated) matches through the watch registry with `pane closed by owner: <reason>` and withdraw held wakes; already-settled matches are retired only when their wake is still held. Reply synchronously with retired IDs. Ignore malformed payloads and log only a payload-free debug message. Delivered wakes cannot be recalled.
+Bellwether subscribes to `bellwether/pane-close/v1` at extension load without I/O or publishing. The payload is `{ paneId: string, terminalId?: string, reason: string, reply?: (result: { retired: string[] }) => void }`. Match local watches by stable pane ID, resolved named-agent pane, or terminal ID. Cancel active (including gated) matches through the watch registry with `pane closed by owner: <reason>` and withdraw held wakes; already-settled matches are retired when their wake is mailed or in flight. Reply synchronously with retired IDs. Ignore malformed payloads and log only a payload-free debug message. Delivered wakes cannot be recalled.
 
-Every agent wake goes through `src/wake.ts`: hold while the agent runs, batch after `agent_end`, offer to pi-until on `pi-until:follow-up`, and fall back to a direct follow-up. Shutdown flushes directly. Cancel withdraws a held wake by watch id.
+Every agent wake goes through `src/wake-record.ts`: send a signed `sh.mschf.agentgraph.wake` record to the live self Rat King name. pi-ratking owns urgency, batching, withdrawal, and delivery through pi-until. Without a live name or on send refusal/timeout, deliver one local follow-up. Cancel sends a `cancelled` record for a mailed watch id; local follow-ups cannot be withdrawn.
 
 ## Library exports
 
-`package.json` `exports` lets downstream packages (Muster 🐑) import the generic modules as a library: `herdr-client`, `sidebar`, `wake`, and `watch`. Each maps to its `src/*.ts` file, which `files` already ships. Keep those modules free of product policy; a downstream package imports them and never the extension file. Bellwether never imports a downstream package. Changing an exported signature is a breaking change for Muster.
+`package.json` `exports` lets downstream packages (Muster 🐑) import the generic modules as a library: `herdr-client`, `sidebar`, `wake-record`, and `watch`. Each maps to its `src/*.ts` file, which `files` already ships. Keep those modules free of product policy; a downstream package imports them and never the extension file. Bellwether never imports a downstream package. Changing an exported signature is a breaking change for Muster.
 
 ## Public tools
 

@@ -75,13 +75,13 @@ The approved first cut intentionally supports only `agent_state` and `pane_outpu
 
 ## Wakes
 
-Watch and degraded ping-wait settlements wake the agent through one router (`src/wake.ts`).
+Watch and degraded ping-wait settlements send signed `sh.mschf.agentgraph.wake` records to the owner's live Rat King name (`src/wake-record.ts`). pi-ratking owns urgency, batching, and delivery through pi-until.
 
-- Wakes that settle while the agent runs are held until `agent_end`, then sent as one follow-up about 250 ms later. A burst of idle-time settlements also merges. Several wakes arrive as `bellwether-wakes` with every receipt in the content and `details.wakes`; a single wake keeps its original custom type and details.
-- A held wake is delayed at most five minutes if an `agent_end` is missed. It is never dropped.
-- Bellwether first offers the follow-up to pi-until's session arbiter on `pi-until:follow-up`. When pi-until accepts, it serializes the wake with its own follow-ups and Pi receives `details: { followUpId, receipt }`. Otherwise Bellwether sends the follow-up directly.
-- Session shutdown delivers held wakes directly, because pi-until may be stopping its queue in the same shutdown.
-- Cancelling a watch withdraws its wake if the wake is still held behind the current run.
+- Without a live self name, Bellwether sends one local follow-up with the original custom type and details. It does not batch.
+- A refused send or a missing delivery result after 15 seconds falls back to that same local follow-up and warns the owner.
+- Records cap text at 8192 characters, terminal evidence at 12 lines / 2048 characters, and encoded size at 16 KB. They omit socket routing.
+- Cancelling a mailed wake sends a `cancelled` record for the same watch. pi-ratking withdraws it if still held. Local follow-ups cannot be withdrawn.
+- Notify, silent, and already-reported settlements remain local only.
 
 ## Pane-close wakes
 
@@ -98,7 +98,7 @@ An owner closing a pane can emit `bellwether/pane-close/v1` on `pi.events`:
 
 Bellwether subscribes at extension load but performs no I/O until a watch starts. It never publishes this event. The listener cancels matching local active watches, including gated watches, and withdraws held wakes. Matching uses the stable pane ID, a named agent's observed pane ID, or the optional terminal ID after pane renumbering. Pane-output watches resolve their terminal identity once; agent-state watches learn it from their existing liveness probe. A gated pane target can match directly before any probe runs.
 
-The retained receipt is `cancelled` with `failure: "pane closed by owner: <reason>"`; cancellation does not wake. If a watch already settled as `targetGone` (or another terminal status), it is retired only when its wake is still held. Already-delivered wakes cannot be recalled. `reply` receives `{ retired }` synchronously. Invalid payloads are ignored with a payload-free debug log.
+The retained receipt is `cancelled` with `failure: "pane closed by owner: <reason>"`; cancellation does not wake. If a watch already settled as `targetGone` (or another terminal status), it is retired when Bellwether has a mailed or in-flight wake to withdraw. Already-delivered wakes cannot be recalled. `reply` receives `{ retired }` synchronously. Invalid payloads are ignored with a payload-free debug log.
 
 ## Slash commands
 

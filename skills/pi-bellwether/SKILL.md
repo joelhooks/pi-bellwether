@@ -74,7 +74,7 @@ Read or inspect the pane first. `herdr_pane close` requires `confirm: true` and 
 
 `herdr_layout overview` lists each Pi agent's `piSessionId`. Report-to addresses and what counts as evidence are Muster's policy, not Bellwether's.
 
-Wakes that settle while you are working arrive together as one `bellwether-wakes` follow-up after the turn ends. Read every receipt in it. When pi-until is loaded, it serializes Bellwether wakes with its own follow-ups.
+Agent wakes travel as signed `sh.mschf.agentgraph.wake` records to your live Rat King name. pi-ratking owns urgency, batching, withdrawal, and delivery through pi-until. Without a live name, or if mail is refused or times out, Bellwether sends one local follow-up. Read each receipt. Local follow-ups cannot be withdrawn.
 
 ## Degraded fallback
 
