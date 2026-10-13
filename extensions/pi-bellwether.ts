@@ -53,7 +53,6 @@ import {
   type BellwetherSuspensionData,
   type SuspendedPingWait,
 } from "../src/suspension.ts";
-import { createPromptGate } from "../src/prompt-gate.ts";
 import { createSidebarReporter, type SidebarReporter } from "../src/sidebar.ts";
 import {
   createWatchRegistry,
@@ -628,6 +627,13 @@ async function refusePiAgentState(
   );
 }
 
+export const PI_PROMPT_EVENT = "bellwether/pi-prompt/v1";
+/** Thrown by the prompt resolve step when the target is a Pi: its prompt goes by mail, never keystrokes. */
+class PiPromptTarget {
+  constructor(readonly paneId: string, readonly terminalId: string | undefined) {}
+}
+const PI_PROMPT_CAP_MS = 40_000;
+
 async function runRequest(
   client: HerdrClient,
   input: HerdrRequest,
@@ -737,6 +743,9 @@ async function runPromptWithProofOfLife(
   }
   const resolvedAgent = recordField(resolved, "agent");
   const identity = resolvedPaneIdentity(resolvedAgent);
+  if (stringField(resolvedAgent, "agent") === "pi") {
+    throw new PiPromptTarget(identity.paneId, stringField(resolvedAgent, "terminal_id"));
+  }
   const targetPaneId = identity.paneId;
   const alreadyWorking = stringField(resolvedAgent, "agent_status") === "working";
   const proofStartedAtMs = Date.now();
@@ -1014,12 +1023,7 @@ export function renderWatchLivenessWidget(
   ];
 
   for (const receipt of active.slice(0, WATCH_WIDGET_MAX_ROWS)) {
-    const phase =
-      receipt.phase === "gated"
-        ? "awaiting prompt"
-        : receipt.phase === "starting"
-          ? "connecting"
-          : "watching";
+    const phase = receipt.phase === "starting" ? "connecting" : "watching";
     const target = receipt.target ?? receipt.pane;
     const detail = [target, watchAge(receipt.startedAt, now)].filter(Boolean).join(" · ");
     lines.push(
@@ -1082,7 +1086,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
   let watchWidgetTui: { requestRender: () => void } | undefined;
   let shuttingDown = false;
   let sidebar: SidebarReporter | undefined;
-  const promptGate = createPromptGate();
   const wakes = createWakeRouter({
     events: pi.events,
     sendMessage: (message, options) => pi.sendMessage(message, options),
@@ -1097,8 +1100,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     appendEntry: (type, data) => pi.appendEntry(type, data),
     notify: (message, level) => currentContext?.ui.notify(message, level),
     sendMessage: (message) => wakes.wake({ ...message, key: message.details.id }),
-    promptGate: (input) =>
-      input.kind === "agent_state" ? promptGate.gateFor(input.target) : undefined,
     onLifecycle: () => {
       sidebar?.changed();
       requestWatchWidgetRender();
@@ -1155,6 +1156,54 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       content: `Degraded Herdr ping fallback settled. Inspect the pane and receipt before continuing.\n\n${JSON.stringify(receipt)}`,
       customType: "herdr-ping-wait",
       details: receipt,
+    });
+  };
+
+  /**
+   * bellwether-yoink S4: a Pi takes its prompts as Rat King mail. A Muster owner claims a prompt to its own live row,
+   * sends it, and proves life with the row's working turn record. Nobody claiming means nothing is typed.
+   */
+  const routePiPrompt = async (
+    target: string,
+    text: string,
+    paneId: string,
+    terminalId: string | undefined,
+  ) => {
+    let claimed: Promise<unknown> | undefined;
+    pi.events.emit(PI_PROMPT_EVENT, {
+      paneId,
+      ...(terminalId ? { terminalId } : {}),
+      target,
+      text,
+      claim: (result: Promise<unknown>) => {
+        if (!claimed && result && typeof (result as Promise<unknown>).then === "function") claimed = result;
+      },
+    });
+    if (!claimed) {
+      return toolFailure(
+        `PromptUnrouted: ${target} [${paneId}] is a Pi that no Muster owner in this session claims; nothing was typed. ` +
+          "Send it mail with ratking (to its Rat King name), or prompt it from the session that owns its row.",
+        { action: "prompt", ok: false, stage: "route", targetPaneId: paneId },
+      );
+    }
+    const result = await Promise.race([
+      claimed.catch((error: unknown) => ({ outcome: "refused", reason: error instanceof Error ? error.message : String(error) })),
+      new Promise((resolve) => setTimeout(() => resolve({ outcome: "refused", reason: `no answer from the Muster owner within ${PI_PROMPT_CAP_MS / 1000} s` }), PI_PROMPT_CAP_MS).unref?.()),
+    ]);
+    const outcome = isRecord(result) ? result : { outcome: "refused", reason: "malformed answer from the Muster owner" };
+    const row = typeof outcome.row === "string" ? outcome.row : target;
+    const receipt = typeof outcome.receipt === "string" ? outcome.receipt : undefined;
+    if (outcome.outcome === "working" || outcome.outcome === "queued") {
+      return toolText(
+        outcome.outcome === "working"
+          ? `Prompted ${row} by mail ${receipt}; its working turn record is the proof of life.`
+          : `Mailed ${row} (${receipt}); it is mid-turn, so the prompt runs after this turn ends.`,
+        { action: "prompt", ok: true, routed: "ratking", outcome: outcome.outcome, row, receipt, targetPaneId: paneId },
+      );
+    }
+    const reason = typeof outcome.reason === "string" ? outcome.reason : "refused";
+    return toolFailure(`Prompt to ${row} by mail refused: ${reason}`, {
+      action: "prompt", ok: false, stage: "route", routed: "ratking", row, ...(receipt ? { receipt } : {}), targetPaneId: paneId,
     });
   };
 
@@ -1843,7 +1892,7 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       "Control a recognized coding agent in an existing Herdr pane. Agent startup timeoutSeconds uses seconds and reports readiness without guessing. Prompt submits once and waits up to 30 seconds for Herdr-observed working state as proof of life, but does not wait for completion or start a watch. Failures include one bounded diagnostic at most. External-state observation belongs only in herdr_watch.",
     promptSnippet: "Start, prompt, read, and interact with Herdr coding agents",
     parameters: herdrAgentParameters,
-    async execute(toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal) {
       switch (params.action) {
         case "list": {
           const result = await runRequest(client, { method: "agent.list" }, signal);
@@ -1941,10 +1990,8 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
           if (!params.target || !params.prompt) {
             throw new Error("target and prompt are required for prompt");
           }
+          // bellwether-yoink S4: a Pi is prompted by Rat King mail through its Muster owner, never by keystrokes.
           let proof: Awaited<ReturnType<typeof runPromptWithProofOfLife>>;
-          // message_end normally announced this call already; direct calls
-          // still gate any watch that starts while the prompt is in flight.
-          promptGate.announce(toolCallId, params.target);
           try {
             proof = await runPromptWithProofOfLife(
               client,
@@ -1953,6 +2000,9 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
               signal,
             );
           } catch (error) {
+            if (error instanceof PiPromptTarget) {
+              return routePiPrompt(params.target, params.prompt, error.paneId, error.terminalId);
+            }
             const failure =
               error instanceof AgentControlFailure
                 ? error
@@ -1963,11 +2013,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
                     submission: "uncertain",
                     aborted: signal?.aborted,
                   });
-            promptGate.settle(toolCallId, {
-              proven: false,
-              paneId: failure.resolvedIdentity?.paneId,
-              reason: `${failure.stage}: ${failure.primaryError.code ?? failure.primaryError.message}`,
-            });
             const diagnostic = await failureDiagnostic(
               client,
               failure.resolvedIdentity?.paneId,
@@ -1996,11 +2041,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
             );
           }
           const agent = recordField(proof.result, "agent");
-          promptGate.settle(toolCallId, {
-            proven: true,
-            paneId: proof.targetPaneId,
-            agentName: stringField(agent, "name"),
-          });
           return toolText(`Proof of life from ${summarizeAgent(agent)}`, {
             action: params.action,
             ok: true,
@@ -2154,36 +2194,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
       if (params.action === "cancel") wakes.withdraw(params.id);
       return toolText(watchReceiptText(receipt), receipt);
     },
-  });
-
-  // Pi prepares every tool call in an assistant message before executing any,
-  // and message_end precedes all of them. Announce prompts here so a watch from
-  // the same message gates on proof of life whatever order the calls run in.
-  pi.on("message_end", (event) => {
-    const message = event.message as {
-      role?: unknown;
-      content?: unknown;
-    };
-    if (message.role !== "assistant" || !Array.isArray(message.content)) return;
-    for (const part of message.content) {
-      if (!isRecord(part) || part.type !== "toolCall" || part.name !== "herdr_agent") continue;
-      const args = part.arguments;
-      if (
-        typeof part.id === "string" &&
-        isRecord(args) &&
-        args.action === "prompt" &&
-        typeof args.target === "string" &&
-        args.target.trim()
-      ) {
-        promptGate.announce(part.id, args.target);
-      }
-    }
-  });
-
-  // Every executed prompt has settled by turn end. Anything still pending was
-  // blocked or aborted before it ran.
-  pi.on("turn_end", () => {
-    promptGate.sweep("prompt call did not execute");
   });
 
   // Wakes that settle during a run wait for it to end, then go out as one.
@@ -2446,7 +2456,6 @@ export default function bellwetherExtension(pi: ExtensionAPI) {
     watchWidgetTimer = undefined;
     currentContext?.ui.setWidget(WATCH_WIDGET_ID, undefined);
     watchWidgetTui = undefined;
-    promptGate.sweep("session ended");
     // Wakes that settled just before shutdown still reach the next run.
     wakes.flush({ direct: true });
     agentBusy = false;

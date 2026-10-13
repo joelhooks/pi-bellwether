@@ -9,8 +9,8 @@ It replaces the loaded `pi-herdr` fork after a separate settings cutover. The fo
 Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only when a tool or command runs.
 
 - Effect 4.0.0-beta.99 owns socket path resolution, one newline-delimited JSON request per socket, Schema decoding, typed errors, timeouts, interruption, and cleanup.
-- XState 5.32.5 owns each watch lifecycle: `[gated ->] starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
-- Pi runs tool calls in parallel, and Herdr `agent.wait` returns at once for a state the agent already holds. An `agent_state` watch started beside its own prompt would match the previous task's idle state. Bellwether announces prompt calls when the assistant message ends, holds such a watch in `gated` until the prompt proves `working`, and fails it with `prompt_unproven` when proof never arrives.
+- XState 5.32.5 owns each watch lifecycle: `starting -> running -> matched | timedOut | targetGone | failed | cancelled`.
+- A Pi is prompted by Rat King mail, not keystrokes: `herdr_agent prompt` to a Pi emits `bellwether/pi-prompt/v1` for its Muster owner to claim, and refuses with `PromptUnrouted` when nobody does. Pi turn state comes from Rat King turn records, so `agent_state` watches refuse Pi panes.
 - Each watch owns one direct Herdr wait socket. Watches do not shell out, spawn `herdr`, or pool connections.
 - Agent-state watches also use bounded one-request `agent.get` probes every five seconds. A crashed TUI that returns to a live shell settles as `targetGone` even when Herdr emits no release event.
 - Active watches render in a compact Pi widget with a live spinner, phase, target, and elapsed time. The widget hides when no watch is active.

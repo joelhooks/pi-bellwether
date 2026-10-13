@@ -10,7 +10,6 @@ const approved = [
   "src/herdr-client.ts",
   "src/pi-session.ts",
   "src/ping-wait.ts",
-  "src/prompt-gate.ts",
   "src/sidebar.ts",
   "src/suspension.ts",
   "src/wake.ts",

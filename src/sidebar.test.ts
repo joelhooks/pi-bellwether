@@ -79,10 +79,6 @@ describe("sidebar tokens", () => {
     expect(token).toBe("⏳ 3 waits · reviewer +2 · 2h");
   });
 
-  test("gated watches say they wait on a prompt", () => {
-    expect(waitToken([receipt({ phase: "gated" })], NOW)).toBe("⏳ reviewer · prompt…");
-  });
-
   test("tokens stay short enough for the sidebar", () => {
     const token = waitToken(
       [receipt({ label: "a very long custom label that goes on and on forever", kind: "pane_output" })],

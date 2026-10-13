@@ -58,7 +58,7 @@ export function waitToken(watches: readonly WatchReceipt[], now: number): string
   const oldest = [...watches].sort(
     (left, right) => Date.parse(left.startedAt) - Date.parse(right.startedAt),
   )[0] as WatchReceipt;
-  const when = oldest.phase === "gated" ? "prompt…" : age(oldest.startedAt, now);
+  const when = age(oldest.startedAt, now);
   if (watches.length === 1) {
     const suffix = ` · ${when}`;
     return `⏳ ${clip(waitName(oldest), SIDEBAR_TOKEN_MAX_CHARS - 2 - suffix.length)}${suffix}`;

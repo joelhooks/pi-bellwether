@@ -142,7 +142,7 @@ export function agentInfo(overrides: Record<string, unknown> = {}) {
   return {
     terminal_id: "term-1",
     name: "worker",
-    agent: "pi",
+    agent: "claude",
     agent_status: "idle",
     workspace_id: "w1",
     tab_id: "w1:t1",

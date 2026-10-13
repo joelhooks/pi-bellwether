@@ -4,7 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { truncateLine, truncateTail } from "@earendil-works/pi-coding-agent";
 
 import { Effect } from "effect";
-import { assign, createActor, fromCallback, fromPromise, setup } from "xstate";
+import { assign, createActor, fromCallback, setup } from "xstate";
 import type { AnyActorRef, EventObject } from "xstate";
 
 import {
@@ -17,7 +17,6 @@ import {
   type HerdrResult,
 } from "./herdr-client.ts";
 import { piSessionIdFromAgent } from "./pi-session.ts";
-import type { PromptGateOutcome } from "./prompt-gate.ts";
 
 export const MAX_ACTIVE_WATCHES = 32;
 /** Keep only the newest terminal receipts; active actors are stored separately. */
@@ -36,8 +35,7 @@ export type WatchStatus =
   | "targetGone"
   | "failed"
   | "cancelled";
-/** `gated` waits for a same-turn prompt's proof of life before touching Herdr. */
-export type WatchPhase = "gated" | "starting" | "running";
+export type WatchPhase = "starting" | "running";
 export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 export type ReadSource = "visible" | "recent" | "recent-unwrapped";
 
@@ -321,7 +319,6 @@ function terminalStatus(value: unknown): Exclude<WatchStatus, "running"> | undef
 }
 
 function activePhase(value: unknown): WatchPhase | undefined {
-  if (value === "gated") return "gated";
   if (typeof value !== "object" || value === null || !("active" in value)) {
     return undefined;
   }
@@ -406,13 +403,6 @@ export interface WatchRegistryOptions {
   ) => void;
   readonly createId?: () => string;
   readonly now?: () => number;
-  /**
-   * Consulted once when an agent_state watch starts. A returned promise holds
-   * the watch in the gated phase until the same-turn prompt proves life.
-   */
-  readonly promptGate?: (
-    input: WatchInput,
-  ) => Promise<PromptGateOutcome> | undefined;
 }
 
 export interface WatchToolContext {
@@ -427,7 +417,6 @@ export interface SuspendedWatch {
 export function createWatchRegistry(options: WatchRegistryOptions) {
   const activeRecords = new Map<string, WatchRecord>();
   const terminalReceipts = new Map<string, WatchReceipt>();
-  const promptGates = new Map<string, Promise<PromptGateOutcome>>();
   const now = options.now ?? Date.now;
   const agentProbeIntervalMs = Math.max(
     1,
@@ -437,13 +426,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
   let shuttingDown = false;
 
   const machine = setup({
-    guards: {
-      hasPromptGate: ({ context }) => promptGates.has(context.input.id),
-    },
     actors: {
-      promptGate: fromPromise<PromptGateOutcome, WatchInput>(
-        ({ input }) => promptGates.get(input.id) ?? Promise.resolve({ kind: "open" }),
-      ),
       agentProbe: fromCallback<EventObject, WatchInput>(({ input, sendBack }) => {
         const controller = new AbortController();
         let disposed = false;
@@ -521,41 +504,7 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
     initial: "init",
     states: {
       init: {
-        always: [
-          { guard: "hasPromptGate", target: "gated" },
-          { target: "active" },
-        ],
-      },
-      gated: {
-        invoke: {
-          input: ({ context }) => context.input,
-          src: "promptGate",
-          onDone: [
-            {
-              guard: ({ event }) => event.output.kind === "open",
-              target: "active",
-            },
-            {
-              actions: assign({
-                code: "prompt_unproven",
-                failure: ({ event }) =>
-                  event.output.kind === "unproven"
-                    ? `prompt to ${event.output.target} was not proven delivered (${event.output.reason}); the watch would have matched stale state`
-                    : undefined,
-              }),
-              target: "failed",
-            },
-          ],
-          onError: {
-            actions: assign({
-              code: "prompt_unproven",
-              failure: ({ event }) =>
-                event.error instanceof Error ? event.error.message : String(event.error),
-            }),
-            target: "failed",
-          },
-        },
-        on: { CANCEL: { target: "cancelled" } },
+        always: { target: "active" },
       },
       active: {
         initial: "starting",
@@ -682,7 +631,6 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
 
     const receipt = toReceipt(record);
     activeRecords.delete(record.input.id);
-    promptGates.delete(record.input.id);
     record.subscription?.unsubscribe();
     record.subscription = undefined;
     record.actor.stop();
@@ -903,9 +851,6 @@ export function createWatchRegistry(options: WatchRegistryOptions) {
         startedAt,
         wake: params.wake ?? "agent",
       };
-      const gate =
-        input.kind === "agent_state" ? options.promptGate?.(input) : undefined;
-      if (gate) promptGates.set(id, gate);
       return runInput(
         input,
         params.timeoutMs === undefined ? undefined : startedAt + params.timeoutMs,

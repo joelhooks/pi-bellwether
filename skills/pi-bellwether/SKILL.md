@@ -13,8 +13,8 @@ Bellwether owns generic Herdr control. Project workflow (lanes, catalog rows, pa
 1. Start discovery with `herdr_layout overview`. Pass an explicit workspace when the caller's workspace is not the intended scope. Do not reconstruct the same snapshot with shell calls or global agent lists.
 2. Use `herdr_layout workspace_rename` and `herdr_pane rename` for display labels. Keep `herdr_agent rename` for agent identity.
 3. Use `herdr_agent start` only with an existing available pane. Treat readiness as proven only when the result says `readiness.state: "proven"`.
-4. Use `herdr_agent prompt` to submit one prompt. It returns after Herdr observes `working` state, or returns a bounded failed ToolResult with submission state and diagnostics.
-5. Arm `herdr_watch` only when a separate external condition matters. A prompt and its `agent_state` watch may share one message: the watch holds in `gated` until the prompt proves life.
+4. Use `herdr_agent prompt` to submit one prompt. For a non-Pi agent it types the text and returns after Herdr observes `working`, or a bounded failed ToolResult with submission state and diagnostics. For a Pi it types nothing: it emits `bellwether/pi-prompt/v1`, the Muster owner of that row mails the prompt over Rat King and proves life with the row's `working` turn record, and the result names the row and the mail receipt. An unclaimed Pi gets `PromptUnrouted`.
+5. Arm `herdr_watch` only when a separate external condition matters.
 6. Use receipt evidence first. Inspect more output or task artifacts when needed to verify completion.
 7. Cancel watches that no longer matter.
 
@@ -43,10 +43,10 @@ Status and wake text include observed agent identity/state or a terminal excerpt
 `herdr_watch start` returns a running receipt immediately. Use `timeoutSeconds` for a deadline; `7200` means two hours. Never pass an ambiguous `timeout` field. Its XState lifecycle is:
 
 ```text
-[gated ->] starting -> running -> matched | timedOut | targetGone | failed | cancelled
+starting -> running -> matched | timedOut | targetGone | failed | cancelled
 ```
 
-An `agent_state` watch started while this session has a `herdr_agent prompt` in flight enters `gated` first. Bellwether announces prompt calls when the assistant message ends, before any tool runs, so call order and parallel execution do not matter. The watch touches Herdr only after the prompt proves `working`; otherwise it fails with code `prompt_unproven` instead of matching the previous task's idle state.
+For a non-Pi agent, start an `agent_state` watch after its prompt returns: Herdr `agent.wait` returns at once for a state the agent already holds.
 
 Wake policies:
 
