@@ -62,11 +62,9 @@ Active direct watches and degraded ping waits survive `/reload`. Bellwether susp
 
 While the session owns an active watch and runs in a Herdr pane, Bellwether publishes display-only metadata under source `user:bellwether.v1` with a three-minute lease:
 
-- pane `$wait`: what this session waits on, such as `⏳ reviewer · 4m`; cleared when the last watch ends;
-- workspace `$agents`: counts of the other agents by state;
-- workspace `$needs`: blocked agent names, cleared when nothing is blocked.
+- pane `$wait`: what this session waits on, such as `⏳ reviewer · 4m`; cleared when the last watch ends.
 
-It makes no Herdr request while no watch is active. `$progress` belongs to the project owner (Muster or `herdr-workflow`).
+It makes no Herdr request while no watch is active. Workspace tokens belong to the project owner: Muster publishes `$agents` from Rat King turn records, plus `$progress` and `$needs`.
 
 ## Close guard
 

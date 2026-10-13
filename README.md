@@ -14,7 +14,7 @@ Bellwether keeps Pi startup side-effect free. It resolves the Herdr socket only 
 - Each watch owns one direct Herdr wait socket. Watches do not shell out, spawn `herdr`, or pool connections.
 - Agent-state watches also use bounded one-request `agent.get` probes every five seconds. A crashed TUI that returns to a live shell settles as `targetGone` even when Herdr emits no release event.
 - Active watches render in a compact Pi widget with a live spinner, phase, target, and elapsed time. The widget hides when no watch is active.
-- Inside a Herdr pane, active watches also drive the Herdr sidebar under source `user:bellwether.v1` with a three-minute lease: pane `$wait` (for example `⏳ reviewer · 4m`), workspace `$agents` (other agents by state), and workspace `$needs` (blocked agent names). Herdr merges tokens across sources, so Bellwether clears only its own pane token and lets workspace tokens expire. No request is sent while no watch is active. Add `["$wait"]` to `ui.sidebar.agents.rows` to show it.
+- Inside a Herdr pane, active watches also drive the Herdr sidebar under source `user:bellwether.v1` with a three-minute lease: pane `$wait` (for example `⏳ reviewer · 4m`). Bellwether publishes no workspace tokens: Muster publishes `$agents` from Rat King turn records. Herdr merges tokens across sources, so Bellwether clears only its own pane token. No request is sent while no watch is active. Add `["$wait"]` to `ui.sidebar.agents.rows` to show it.
 - Herdr `error.code` determines timeout and target-loss states. Error prose does not.
 
 `herdr_ping_wait` remains an explicit degraded crash and turn fallback. It is the only child-process wait path. `herdr_watch` never calls it.

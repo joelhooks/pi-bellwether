@@ -2,9 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createHerdrClient } from "./herdr-client.ts";
 import {
-  agentsToken,
   createSidebarReporter,
-  needsToken,
   SIDEBAR_SOURCE,
   waitToken,
 } from "./sidebar.ts";
@@ -88,33 +86,6 @@ describe("sidebar tokens", () => {
     expect([...(token ?? "")].length).toBeLessThanOrEqual(32);
     expect(token).toContain("…");
   });
-
-  test("agentsToken counts other agents by state and drops trailing counts that do not fit", () => {
-    const agents = [
-      agentInfo({ pane_id: "w1:p1", agent_status: "working" }),
-      agentInfo({ pane_id: "w1:p2", agent_status: "working" }),
-      agentInfo({ pane_id: "w1:p3", agent_status: "blocked" }),
-      agentInfo({ pane_id: "w1:p4", agent_status: "idle" }),
-      agentInfo({ pane_id: "w1:p5", agent_status: "done" }),
-    ];
-    expect(agentsToken(agents, "w1:p1")).toBe("1 working · 1 blocked · 1 done");
-    expect(agentsToken(agents.slice(2), "w1:p1")).toBe("1 blocked · 1 done · 1 idle");
-    expect(agentsToken([agentInfo({ pane_id: "w1:p1" })], "w1:p1")).toBeNull();
-  });
-
-  test("needsToken names blocked agents and clears when none are blocked", () => {
-    expect(
-      needsToken(
-        [
-          agentInfo({ pane_id: "w1:p2", name: "reviewer", agent_status: "blocked" }),
-          agentInfo({ pane_id: "w1:p3", name: "tests", agent_status: "blocked" }),
-          agentInfo({ pane_id: "w1:p4", name: "docs", agent_status: "working" }),
-        ],
-        "w1:p1",
-      ),
-    ).toBe("⛔ reviewer, tests");
-    expect(needsToken([agentInfo({ agent_status: "working" })], "w1:p9")).toBeNull();
-  });
 });
 
 describe("sidebar reporter", () => {
@@ -160,7 +131,8 @@ describe("sidebar reporter", () => {
     expect(fake.requests).toHaveLength(0);
   });
 
-  test("publishes pane wait and workspace agents/needs with a lease", async () => {
+  // bellwether-yoink S5: workspace $agents comes from Muster's turn records; Bellwether scrapes no pane state.
+  test("publishes only the pane wait, with a lease, and reads no agent list", async () => {
     const fake = await server();
     let active = [receipt()];
     const reporter = createSidebarReporter({
@@ -172,8 +144,9 @@ describe("sidebar reporter", () => {
     });
     reporter.changed();
     await vi.waitFor(() =>
-      expect(fake.requests.map((request) => request.method)).toContain("workspace.report_metadata"),
+      expect(fake.requests.map((request) => request.method)).toContain("pane.report_metadata"),
     );
+    expect(fake.requests.map((request) => request.method)).toEqual(["pane.get", "pane.report_metadata"]);
 
     const pane = fake.requests.find((request) => request.method === "pane.report_metadata");
     expect(pane?.params).toMatchObject({
@@ -182,13 +155,6 @@ describe("sidebar reporter", () => {
       tokens: { wait: "⏳ reviewer · 4m" },
       ttl_ms: expect.any(Number),
       seq: expect.any(Number),
-    });
-    const workspace = fake.requests.find((request) => request.method === "workspace.report_metadata");
-    expect(workspace?.params).toMatchObject({
-      workspace_id: "w1",
-      source: SIDEBAR_SOURCE,
-      tokens: { agents: "1 blocked", needs: "⛔ reviewer" },
-      ttl_ms: expect.any(Number),
     });
 
     const before = fake.requests.length;
@@ -229,22 +195,6 @@ describe("sidebar reporter", () => {
     await reporter.stop();
   });
 
-  test("leaves a managed space's agents and needs to its project manager", async () => {
-    const fake = await server({ progress: "🐑 1/2 lanes" });
-    const reporter = createSidebarReporter({
-      client: createHerdrClient({ socketPath: fake.socketPath }),
-      paneId: "w1:p1",
-      watches: () => [receipt()],
-      now: () => NOW,
-      debounceMs: 1,
-    });
-    reporter.changed();
-    await vi.waitFor(() => expect(fake.requests.map((request) => request.method)).toContain("workspace.list"));
-    await reporter.stop();
-    expect(fake.requests.map((request) => request.method)).toContain("pane.report_metadata");
-    expect(fake.requests.map((request) => request.method)).not.toContain("workspace.report_metadata");
-  });
-
   test("stop clears a published wait token once", async () => {
     const fake = await server();
     const reporter = createSidebarReporter({
@@ -256,7 +206,7 @@ describe("sidebar reporter", () => {
     });
     reporter.changed();
     await vi.waitFor(() =>
-      expect(fake.requests.map((request) => request.method)).toContain("workspace.report_metadata"),
+      expect(fake.requests.map((request) => request.method)).toContain("pane.report_metadata"),
     );
     await reporter.stop();
     expect(fake.requests.at(-1)).toMatchObject({

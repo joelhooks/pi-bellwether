@@ -8,11 +8,9 @@ import type { WatchReceipt } from "./watch.ts";
  *
  * Herdr merges custom tokens from every source into one map per pane or
  * workspace: the last writer wins and any source's clear removes the token.
- * Bellwether therefore clears only its own pane's `$wait`, and leaves the shared
- * workspace tokens `$agents` and `$needs` to expire through their lease.
- * `$progress` belongs to a project manager (Muster, herdr-workflow). A space
- * that carries it has an owner that publishes its own `$agents` and `$needs`,
- * so Bellwether leaves that space's tokens alone.
+ * Bellwether publishes and clears only its own pane's `$wait`. Workspace
+ * `$agents` comes from Muster, out of Rat King turn records (bellwether-yoink
+ * S5); Bellwether no longer scrapes pane state for it.
  */
 export const SIDEBAR_SOURCE = "user:bellwether.v1";
 export const SIDEBAR_TTL_MS = 3 * 60_000;
@@ -22,13 +20,6 @@ export const SIDEBAR_DEBOUNCE_MS = 250;
 export const SIDEBAR_TOKEN_MAX_CHARS = 32;
 const SIDEBAR_REQUEST_TIMEOUT_MS = 1_500;
 
-interface AgentLike {
-  readonly pane_id?: unknown;
-  readonly workspace_id?: unknown;
-  readonly name?: unknown;
-  readonly agent?: unknown;
-  readonly agent_status?: unknown;
-}
 
 function clip(text: string, max = SIDEBAR_TOKEN_MAX_CHARS): string {
   const chars = [...text.replace(/\s+/g, " ").trim()];
@@ -66,41 +57,6 @@ export function waitToken(watches: readonly WatchReceipt[], now: number): string
   const prefix = `⏳ ${watches.length} waits · `;
   const suffix = ` +${watches.length - 1} · ${when}`;
   return `${prefix}${clip(waitName(oldest), SIDEBAR_TOKEN_MAX_CHARS - prefix.length - suffix.length)}${suffix}`;
-}
-
-function others(agents: readonly AgentLike[], selfPaneId: string): AgentLike[] {
-  return agents.filter((agent) => agent.pane_id !== selfPaneId);
-}
-
-export function agentsToken(agents: readonly AgentLike[], selfPaneId: string): string | null {
-  const counts = new Map<string, number>();
-  for (const agent of others(agents, selfPaneId)) {
-    const status = typeof agent.agent_status === "string" ? agent.agent_status : "unknown";
-    counts.set(status, (counts.get(status) ?? 0) + 1);
-  }
-  // Priority order; drop whole trailing counts rather than cutting a word.
-  let token = "";
-  for (const status of ["working", "blocked", "done", "idle"]) {
-    const count = counts.get(status) ?? 0;
-    if (count === 0) continue;
-    const next = token ? `${token} · ${count} ${status}` : `${count} ${status}`;
-    if ([...next].length > SIDEBAR_TOKEN_MAX_CHARS) break;
-    token = next;
-  }
-  return token || null;
-}
-
-export function needsToken(agents: readonly AgentLike[], selfPaneId: string): string | null {
-  const blocked = others(agents, selfPaneId)
-    .filter((agent) => agent.agent_status === "blocked")
-    .map((agent) =>
-      typeof agent.name === "string"
-        ? agent.name
-        : typeof agent.pane_id === "string"
-          ? agent.pane_id
-          : "agent",
-    );
-  return blocked.length ? clip(`⛔ ${blocked.join(", ")}`) : null;
 }
 
 export interface SidebarReporterOptions {
@@ -174,24 +130,6 @@ export function createSidebarReporter(options: SidebarReporterOptions): SidebarR
       ttl_ms: SIDEBAR_TTL_MS,
     });
     waitPublished = true;
-    const spaces = await request("workspace.list", {});
-    const space = spaces.workspaces.find((workspace) => workspace.workspace_id === pane.workspace_id);
-    if (space?.tokens?.progress) {
-      schedule(refreshMs);
-      return;
-    }
-    const listed = await request("agent.list", {});
-    const scoped = listed.agents.filter((agent) => agent.workspace_id === pane.workspace_id);
-    await request("workspace.report_metadata", {
-      workspace_id: pane.workspace_id,
-      source: SIDEBAR_SOURCE,
-      tokens: {
-        agents: agentsToken(scoped, pane.pane_id),
-        needs: needsToken(scoped, pane.pane_id),
-      },
-      seq: nextSeq(),
-      ttl_ms: SIDEBAR_TTL_MS,
-    });
     schedule(refreshMs);
   };
 
